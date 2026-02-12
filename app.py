@@ -12,7 +12,12 @@ GEMINI_KEY = os.environ.get('GEMINI_KEY')
 
 # Configura IA
 genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+try:
+    # Tente usar o modelo 1.5-flash que é o padrão atual
+    model = genai.GenerativeModel('gemini-1.5-flash')
+except Exception:
+    # Se o erro 404 persistir, tente o modelo flash-latest
+    model = genai.GenerativeModel('flash-latest')
 
 
 bot = telebot.TeleBot(TOKEN, threaded=False)
