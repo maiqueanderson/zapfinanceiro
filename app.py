@@ -3,31 +3,20 @@ import telebot
 from flask import Flask, request
 import psycopg2
 import google.generativeai as genai
-import json
-import traceback
 
 # --- CONFIGURAÇÕES ---
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 DB_URI = os.environ.get('DB_URI')
 GEMINI_KEY = os.environ.get('GEMINI_KEY')
-WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL')
 
-# LOGS DE INICIALIZAÇÃO (Agora fora do if __main__)
-print(f"--- SERVIDOR INICIADO ---")
-print(f"WEBHOOK_URL: {WEBHOOK_URL}")
-
-# Configura IA e Bot
-genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-pro')
+# Inicialização rápida
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# CONFIGURAÇÃO DO WEBHOOK (Fora do if __main__ para o Gunicorn ler)
-if WEBHOOK_URL and TOKEN:
-    webhook_path = f"{WEBHOOK_URL}/{TOKEN}"
-    bot.remove_webhook()
-    bot.set_webhook(url=webhook_path)
-    print(f"Webhook configurado para: {webhook_path}")
+# Configura o Gemini apenas se a chave existir
+if GEMINI_KEY:
+    genai.configure(api_key=GEMINI_KEY)
+    model = genai.GenerativeModel('gemini-pro')
 
 def get_db():
     return psycopg2.connect(DB_URI)
@@ -41,31 +30,40 @@ def webhook():
 
 @app.route('/')
 def index():
-    return "Servidor Online! Cadastre seu ID no banco de dados."
+    return "Bot Financeiro Online!"
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
-    print(f"MENSAGEM RECEBIDA: {message.text}")
     chat_id = message.chat.id
-    
+    text = message.text
+    print(f"Recebido de {chat_id}: {text}")
+
     try:
         conn = get_db()
         cur = conn.cursor()
-        cur.execute("SELECT id FROM users WHERE telegram_chat_id = %s", (str(chat_id),))
+        # Busca o usuário pelo ID do Telegram que você inseriu manualmente
+        cur.execute("SELECT name FROM users WHERE telegram_chat_id = %s", (str(chat_id),))
         user = cur.fetchone()
         
         if not user:
-            bot.reply_to(message, f"Você não está cadastrado. Seu ID é {chat_id}")
+            bot.reply_to(message, f"Olá! Seu ID {chat_id} não está no banco. Cadastre-se primeiro.")
+            conn.close()
             return
 
-        bot.reply_to(message, "Processando com IA...")
-        # Lógica da IA aqui...
+        # Se chegou aqui, o usuário existe!
+        nome_usuario = user[0]
         
+        # Chamada da IA protegida
+        try:
+            prompt = f"O usuário {nome_usuario} disse: '{text}'. Responda de forma curta e amigável confirmando que você é o assistente financeiro dele."
+            response = model.generate_content(prompt)
+            bot.reply_to(message, response.text)
+        except Exception as ai_err:
+            bot.reply_to(message, f"Oi {nome_usuario}! Recebi sua mensagem, mas tive um erro com a IA: {ai_err}")
+
         conn.close()
     except Exception as e:
-        print(f"ERRO: {e}")
-        bot.reply_to(message, "Erro ao processar.")
+        bot.reply_to(message, f"Erro de conexão com o banco: {e}")
 
-# Mantenha o if apenas para testes locais, o Render não usará isso
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
