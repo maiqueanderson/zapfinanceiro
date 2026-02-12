@@ -2,17 +2,16 @@ import os
 import telebot
 from flask import Flask, request
 import psycopg2
-import google.generativeai as genai
+from groq import Groq
 import json
 
 # --- CONFIGURAÇÕES ---
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
 DB_URI = os.environ.get('DB_URI')
-GEMINI_KEY = os.environ.get('GEMINI_KEY')
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 
-# Configura IA
-genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash-latest')
+# Inicializa o Cliente Groq
+client = Groq(api_key=GROQ_API_KEY)
 
 bot = telebot.TeleBot(TOKEN, threaded=False)
 app = Flask(__name__)
@@ -21,27 +20,27 @@ def get_db():
     return psycopg2.connect(DB_URI)
 
 def process_with_ai(text):
-    prompt = f"""
-    Atue como um extrator de dados financeiros para JSON.
-    Frase do usuário: "{text}"
-    
-    Regras de extração:
-    1. Se houver um valor numérico e um item/local, defina "action" como "add_expense".
-    2. Converta o valor para número decimal em "amount" (ex: 18,70 vira 18.70).
-    3. Identifique uma categoria simples (ex: Mercado, Feira, Lazer, Transporte) em "category".
-    4. Coloque o item em "description".
-    5. Se não identificar um gasto, defina "action" como "chat".
-
-    Formato esperado:
-    {{"action": "add_expense", "amount": 0.00, "category": "Tipo", "description": "Item"}}
-    """
     try:
-        response = model.generate_content(prompt)
-        # Limpeza para garantir que apenas o JSON seja lido
-        clean_text = response.text.replace('```json', '').replace('```', '').strip()
-        return json.loads(clean_text)
+        completion = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system", 
+                    "content": (
+                        "Você é um extrator de dados financeiros. "
+                        "Retorne APENAS um objeto JSON puro com as chaves: "
+                        "'action' (sempre 'add_expense'), 'amount' (float), "
+                        "'category' (string simples) e 'description' (string). "
+                        "Se o texto não for um gasto claro, retorne action: 'chat'."
+                    )
+                },
+                {"role": "user", "content": text}
+            ],
+            response_format={"type": "json_object"}
+        )
+        return json.loads(completion.choices[0].message.content)
     except Exception as e:
-        print(f"Erro no processamento da IA: {e}")
+        print(f"Erro no processamento da IA (Groq): {e}")
         return None
 
 @app.route(f'/{TOKEN}', methods=['POST'])
@@ -55,7 +54,7 @@ def webhook():
 
 @app.route('/')
 def index():
-    return "Bot Financeiro ZapFinanceiro está Online!"
+    return "Bot Financeiro ZapFinanceiro (Groq Edition) está Online!"
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
@@ -71,14 +70,13 @@ def handle_message(message):
         user = cur.fetchone()
         
         if not user:
-            bot.reply_to(message, f"Olá! Seu ID {chat_id} não foi encontrado. Por favor, cadastre-se no banco de dados.")
+            bot.reply_to(message, f"Olá! Seu ID {chat_id} não foi encontrado no banco.")
             return
 
-        # Processa a frase com o Gemini
+        # Processa a frase com o Groq
         data = process_with_ai(text)
         
         if data and data.get('action') == 'add_expense':
-            # Insere a transação no banco de dados
             cur.execute(
                 "INSERT INTO transactions (user_id, amount, category, description) VALUES (%s, %s, %s, %s)",
                 (user[0], data['amount'], data['category'], data['description'])
@@ -86,13 +84,13 @@ def handle_message(message):
             conn.commit()
             bot.reply_to(message, f"✅ Salvo, {user[1]}!\n💰 R$ {data['amount']:.2f} em {data['category']}\n📝 {data['description']}")
         else:
-            bot.reply_to(message, f"Oi {user[1]}! Como posso ajudar com suas finanças hoje? Tente algo como 'Gastei 18,70 na feira'.")
+            bot.reply_to(message, f"Oi {user[1]}! Como posso ajudar com suas finanças hoje?")
 
         cur.close()
         conn.close()
     except Exception as e:
         print(f"Erro geral: {e}")
-        bot.reply_to(message, f"Desculpe, tive um problema técnico: {e}")
+        bot.reply_to(message, f"Erro técnico: {e}")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
