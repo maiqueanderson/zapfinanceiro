@@ -30,12 +30,14 @@ def handle_message(message):
     try:
         conn = get_db()
         cur = conn.cursor()
-        # Busca o ID que você inseriu manualmente (8451570682)
-        cur.execute("SELECT name FROM users WHERE telegram_chat_id = %s", (str(chat_id),))
+        
+        # Ajuste aqui: Convertendo explicitamente para int para bater com o int8 do banco
+        cur.execute("SELECT name FROM users WHERE telegram_chat_id = %s", (int(chat_id),))
         user = cur.fetchone()
         
         if user:
-            bot.reply_to(message, f"Olá {user[0]}! Agora eu te reconheço. O banco de dados está conectado!")
+            # Resposta personalizada usando o nome 'Maique' que está no seu banco
+            bot.reply_to(message, f"Olá {user[0]}! Agora o banco de dados está lendo seus dados perfeitamente! ✅")
         else:
             bot.reply_to(message, f"ID {chat_id} não encontrado. Cadastre-se no banco.")
         
@@ -43,7 +45,8 @@ def handle_message(message):
         conn.close()
     except Exception as e:
         print(f"Erro no banco: {e}")
-        bot.reply_to(message, "Conectei, mas houve um erro no banco de dados.")
+        # Retorna o erro exato para o Telegram para sabermos o que aconteceu
+        bot.reply_to(message, f"Erro técnico no banco: {e}")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
