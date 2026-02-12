@@ -16,7 +16,8 @@ bot = telebot.TeleBot(TOKEN, threaded=False)
 app = Flask(__name__)
 
 def get_db():
-    return psycopg2.connect(DB_URI)
+    # Adicionado timeout para evitar que o servidor trave em conexões lentas
+    return psycopg2.connect(DB_URI, connect_timeout=10)
 
 def process_with_ai(text):
     try:
@@ -52,10 +53,13 @@ def process_with_ai(text):
 def handle_message(message):
     chat_id = message.chat.id
     text = message.text
+    conn = None
 
     try:
         conn = get_db()
         cur = conn.cursor()
+        
+        # Busca o usuário pelo ID do Telegram
         cur.execute("SELECT id, name FROM users WHERE telegram_chat_id = %s", (int(chat_id),))
         user = cur.fetchone()
         
@@ -65,9 +69,14 @@ def handle_message(message):
 
         user_id = user[0]
         data = process_with_ai(text)
+        if not data:
+            bot.reply_to(message, "Não consegui entender sua solicitação. Pode repetir?")
+            return
+
         action = data.get('action')
 
         # --- RELATÓRIOS ---
+        # Simplificação da data para evitar erros de fuso horário no servidor
         if action == 'report_today':
             cur.execute("SELECT SUM(amount) FROM transactions WHERE user_id = %s AND date::date = CURRENT_DATE", (user_id,))
             total = cur.fetchone()[0] or 0
@@ -98,11 +107,11 @@ def handle_message(message):
 
         # --- GESTÃO DE CONTAS (scheduled_expenses) ---
         elif action == 'add_bill':
-            # is_active = true significa que a conta está pendente
+            # is_active = true significa conta pendente conforme sua tabela
             cur.execute("INSERT INTO scheduled_expenses (user_id, amount, description, due_day, is_active) VALUES (%s, %s, %s, %s, true)",
                         (user_id, data['amount'], data['description'], data.get('due_day', 1)))
             conn.commit()
-            bot.reply_to(message, f"✅ Conta '{data['description']}' de R$ {data['amount']:.2f} adicionada às contas a pagar.")
+            bot.reply_to(message, f"✅ Conta '{data['description']}' de R$ {data['amount']:.2f} adicionada.")
 
         elif action == 'list_bills':
             cur.execute("SELECT description, amount, due_day FROM scheduled_expenses WHERE user_id = %s AND is_active = true", (user_id,))
@@ -127,19 +136,25 @@ def handle_message(message):
             bot.reply_to(message, f"✅ Gasto de R$ {data['amount']:.2f} salvo!")
 
         else:
-            bot.reply_to(message, f"Oi {user[1]}! Como posso ajudar nas suas finanças hoje?")
+            bot.reply_to(message, f"Oi {user[1]}! Como posso ajudar?")
 
         cur.close()
-        conn.close()
     except Exception as e:
-        bot.reply_to(message, f"Erro: {e}")
+        print(f"Erro Geral: {e}")
+        bot.reply_to(message, f"Houve um problema técnico ao processar sua mensagem.")
+    finally:
+        # Garante o fechamento da conexão para evitar que o Render derrube o processo
+        if conn:
+            conn.close()
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
-    json_string = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_string)
-    bot.process_new_updates([update])
-    return '', 200
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return '', 200
+    return '', 403
 
 @app.route('/')
 def index():
