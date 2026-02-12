@@ -1,14 +1,16 @@
 import os
-import telebot # Biblioteca 'pyTelegramBotAPI' é mais simples para Webhooks
+import telebot # Biblioteca 'pyTelegramBotAPI'
 from flask import Flask, request, render_template_string
 import psycopg2
 import google.generativeai as genai
 import json
 
-# --- CONFIGURAÇÕES (Pegamos das variáveis de ambiente do Render) ---
-TOKEN = os.environ.get('8446507464:AAE26eYolqfO8zyVP3dzhnLT-UOL6Mc3tJE')
-DB_URI = os.environ.get('postgresql://postgres:Mm81892461!@db.avurslqfeiqybuiyukyv.supabase.co:5432/postgres')
-GEMINI_KEY = os.environ.get('AIzaSyAAwP0zwc9AbDFwdRgTlv1FkY8T5np49BU')
+# --- CONFIGURAÇÕES ---
+# Aqui usamos APENAS os nomes das variáveis definidas no Render.
+# O Render vai preencher os valores reais automaticamente.
+TOKEN = os.environ.get('TELEGRAM_TOKEN')
+DB_URI = os.environ.get('DB_URI')
+GEMINI_KEY = os.environ.get('GEMINI_KEY')
 WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL') # O Render cria isso sozinho
 
 # Configura IA
@@ -37,7 +39,6 @@ def process_with_ai(text):
         return None
 
 # --- ROTA DO SITE (CADASTRO) ---
-# Um HTML simples dentro do Python para não precisar de arquivos extras
 HTML_CADASTRO = """
 <html>
 <body>
@@ -84,33 +85,35 @@ def handle_message(message):
     text = message.text
     
     # 1. Verifica usuário
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT id FROM users WHERE telegram_chat_id = %s", (str(chat_id),))
-    user = cur.fetchone()
-    
-    if not user:
-        bot.reply_to(message, f"Você não está cadastrado. Seu ID é {chat_id}. Vá no site e cadastre-se.")
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE telegram_chat_id = %s", (str(chat_id),))
+        user = cur.fetchone()
+        
+        if not user:
+            bot.reply_to(message, f"Você não está cadastrado. Seu ID é {chat_id}. Vá no site e cadastre-se.")
+            conn.close()
+            return
+
+        # 2. Processa com IA
+        data = process_with_ai(text)
+        
+        if data and data.get('action') == 'add_expense':
+            cur.execute("INSERT INTO transactions (user_id, amount, category, description) VALUES (%s, %s, %s, %s)",
+                        (user[0], data['amount'], data['category'], data['description']))
+            conn.commit()
+            bot.reply_to(message, f"💸 Gasto de R$ {data['amount']} em {data['category']} salvo!")
+        
+        elif data and data.get('action') == 'report':
+            bot.reply_to(message, "Gerando relatório... (Funcionalidade em construção)")
+        
+        else:
+            bot.reply_to(message, "Não entendi. Tente 'Gastei 10 reais em pão'.")
+
         conn.close()
-        return
-
-    # 2. Processa com IA
-    data = process_with_ai(text)
-    
-    if data and data.get('action') == 'add_expense':
-        cur.execute("INSERT INTO transactions (user_id, amount, category, description) VALUES (%s, %s, %s, %s)",
-                    (user[0], data['amount'], data['category'], data['description']))
-        conn.commit()
-        bot.reply_to(message, f"💸 Gasto de R$ {data['amount']} em {data['category']} salvo!")
-    
-    elif data and data.get('action') == 'report':
-        # Lógica de relatório aqui...
-        bot.reply_to(message, "Gerando relatório...")
-    
-    else:
-        bot.reply_to(message, "Não entendi. Tente 'Gastei 10 reais em pão'.")
-
-    conn.close()
+    except Exception as e:
+        bot.reply_to(message, f"Erro interno: {e}")
 
 # Configuração para o Render rodar o Webhook ao iniciar
 if __name__ == "__main__":
