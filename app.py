@@ -27,16 +27,16 @@ def process_with_ai(text):
                     "role": "system", 
                     "content": (
                         "Você é um assistente financeiro. Extraia a intenção do usuário em JSON.\n"
-                        "Ações possíveis:\n"
+                        "Ações disponíveis:\n"
                         "1. 'add_expense': Gasto realizado (amount, category, description).\n"
                         "2. 'report_today': Quanto gastei hoje.\n"
                         "3. 'report_month': Quanto gastei no mês.\n"
                         "4. 'report_category': Quanto gastei na categoria X (category).\n"
                         "5. 'top_category': Categoria que mais gastei no mês.\n"
-                        "6. 'add_bill': Conta a pagar (amount, description).\n"
-                        "7. 'list_bills': Ver contas pendentes.\n"
-                        "8. 'pay_bill': Marcar conta como paga (description).\n"
-                        "Retorne apenas o JSON puro."
+                        "6. 'add_bill': Adicionar conta a pagar (amount, description, due_day).\n"
+                        "7. 'list_bills': Listar contas ainda não pagas.\n"
+                        "8. 'pay_bill': Marcar uma conta específica como paga (description).\n"
+                        "Retorne apenas JSON puro."
                     )
                 },
                 {"role": "user", "content": text}
@@ -60,40 +60,30 @@ def handle_message(message):
         user = cur.fetchone()
         
         if not user:
-            bot.reply_to(message, "Usuário não cadastrado.")
+            bot.reply_to(message, "Usuário não encontrado.")
             return
 
         user_id = user[0]
         data = process_with_ai(text)
         action = data.get('action')
 
-        # 1. ADICIONAR GASTO
-        if action == 'add_expense':
-            cur.execute("INSERT INTO transactions (user_id, amount, category, description) VALUES (%s, %s, %s, %s)",
-                        (user_id, data['amount'], data['category'], data['description']))
-            conn.commit()
-            bot.reply_to(message, f"✅ Gasto de R$ {data['amount']:.2f} em {data['category']} salvo!")
-
-        # 2. TOTAL HOJE
-        elif action == 'report_today':
-            cur.execute("SELECT SUM(amount) FROM transactions WHERE user_id = %s AND date = CURRENT_DATE", (user_id,))
+        # --- RELATÓRIOS ---
+        if action == 'report_today':
+            cur.execute("SELECT SUM(amount) FROM transactions WHERE user_id = %s AND date::date = CURRENT_DATE", (user_id,))
             total = cur.fetchone()[0] or 0
-            bot.reply_to(message, f"📅 Total gasto hoje: R$ {total:.2f}")
+            bot.reply_to(message, f"💰 Total gasto hoje: R$ {total:.2f}")
 
-        # 3. TOTAL MÊS
         elif action == 'report_month':
             cur.execute("SELECT SUM(amount) FROM transactions WHERE user_id = %s AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)", (user_id,))
             total = cur.fetchone()[0] or 0
             bot.reply_to(message, f"📊 Total gasto este mês: R$ {total:.2f}")
 
-        # 4. GASTO POR CATEGORIA
         elif action == 'report_category':
             cat = data.get('category')
             cur.execute("SELECT SUM(amount) FROM transactions WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{cat}%"))
             total = cur.fetchone()[0] or 0
             bot.reply_to(message, f"🔍 Total em {cat}: R$ {total:.2f}")
 
-        # 5. MAIOR GASTO (TOP CATEGORIA)
         elif action == 'top_category':
             cur.execute("""
                 SELECT category, SUM(amount) as total FROM transactions 
@@ -102,37 +92,42 @@ def handle_message(message):
             """, (user_id,))
             res = cur.fetchone()
             if res:
-                bot.reply_to(message, f"🏆 Você mais gastou com {res[0]} este mês: R$ {res[1]:.2f}")
+                bot.reply_to(message, f"🏆 Categoria com maior gasto: {res[0]} (R$ {res[1]:.2f})")
             else:
-                bot.reply_to(message, "Ainda não tenho dados suficientes.")
+                bot.reply_to(message, "Ainda não há gastos registrados este mês.")
 
-        # 6. ADICIONAR CONTA A PAGAR
+        # --- GESTÃO DE CONTAS (scheduled_expenses) ---
         elif action == 'add_bill':
-            # Vamos usar a tabela scheduled_expenses para contas a pagar (status false = pendente)
-            cur.execute("INSERT INTO scheduled_expenses (user_id, amount, description, status) VALUES (%s, %s, %s, false)",
-                        (user_id, data['amount'], data['description']))
+            # is_active = true significa que a conta está pendente
+            cur.execute("INSERT INTO scheduled_expenses (user_id, amount, description, due_day, is_active) VALUES (%s, %s, %s, %s, true)",
+                        (user_id, data['amount'], data['description'], data.get('due_day', 1)))
             conn.commit()
-            bot.reply_to(message, f"📝 Conta '{data['description']}' de R$ {data['amount']:.2f} anotada!")
+            bot.reply_to(message, f"✅ Conta '{data['description']}' de R$ {data['amount']:.2f} adicionada às contas a pagar.")
 
-        # 7. LISTAR CONTAS PENDENTES
         elif action == 'list_bills':
-            cur.execute("SELECT description, amount FROM scheduled_expenses WHERE user_id = %s AND status = false", (user_id,))
+            cur.execute("SELECT description, amount, due_day FROM scheduled_expenses WHERE user_id = %s AND is_active = true", (user_id,))
             bills = cur.fetchall()
             if bills:
-                msg = "📌 Contas pendentes:\n" + "\n".join([f"- {b[0]}: R$ {b[1]:.2f}" for b in bills])
-                bot.reply_to(message, msg)
+                msg = "⏳ **Contas Pendentes:**\n" + "\n".join([f"• {b[0]}: R$ {b[1]:.2f} (Dia {b[2]})" for b in bills])
+                bot.reply_to(message, msg, parse_mode="Markdown")
             else:
-                bot.reply_to(message, "✅ Nenhuma conta pendente!")
+                bot.reply_to(message, "🙌 Nenhuma conta pendente!")
 
-        # 8. PAGAR CONTA
         elif action == 'pay_bill':
             desc = data.get('description')
-            cur.execute("UPDATE scheduled_expenses SET status = true WHERE user_id = %s AND description ILIKE %s AND status = false", (user_id, f"%{desc}%"))
+            cur.execute("UPDATE scheduled_expenses SET is_active = false WHERE user_id = %s AND description ILIKE %s AND is_active = true", (user_id, f"%{desc}%"))
             conn.commit()
             bot.reply_to(message, f"✔️ Conta '{desc}' marcada como paga!")
 
+        # --- ADICIONAR GASTO COMUM ---
+        elif action == 'add_expense':
+            cur.execute("INSERT INTO transactions (user_id, amount, category, description) VALUES (%s, %s, %s, %s)",
+                        (user_id, data['amount'], data['category'], data['description']))
+            conn.commit()
+            bot.reply_to(message, f"✅ Gasto de R$ {data['amount']:.2f} salvo!")
+
         else:
-            bot.reply_to(message, f"Oi {user[1]}! Como posso ajudar?")
+            bot.reply_to(message, f"Oi {user[1]}! Como posso ajudar nas suas finanças hoje?")
 
         cur.close()
         conn.close()
