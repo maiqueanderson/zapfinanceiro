@@ -1,0 +1,5 @@
+python-telegram-bot
+Flask
+psycopg2-binary
+google-generativeai
+gunicorn
