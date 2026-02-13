@@ -25,11 +25,10 @@ def process_with_ai(text):
                 {
                     "role": "system", 
                     "content": (
-                        "Você é um extrator de dados financeiros. "
-                        "Analise a frase e retorne APENAS um objeto JSON puro.\n"
-                        "1. Se for um gasto: {'action': 'add_expense', 'amount': float, 'category': str, 'description': str}\n"
-                        "2. Se perguntar quanto gastou: {'action': 'get_report'}\n"
-                        "3. Caso contrário: {'action': 'chat'}"
+                        "Você é um extrator de dados financeiros. Retorne APENAS JSON.\n"
+                        "1. Gasto: {'action': 'add_expense', 'amount': float, 'category': str, 'description': str}\n"
+                        "2. Pergunta de quanto gastou: {'action': 'get_report', 'period': 'today' | 'yesterday' | 'week' | 'month'}\n"
+                        "3. Outros: {'action': 'chat'}"
                     )
                 },
                 {"role": "user", "content": text}
@@ -41,19 +40,6 @@ def process_with_ai(text):
         print(f"Erro IA: {e}")
         return None
 
-@app.route(f'/{TOKEN}', methods=['POST'])
-def webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return '', 200
-    return '', 403
-
-@app.route('/')
-def index():
-    return "Bot Financeiro ZapFinanceiro Online!"
-
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
     chat_id = message.chat.id
@@ -63,19 +49,17 @@ def handle_message(message):
     try:
         conn = get_db()
         cur = conn.cursor()
-        
         cur.execute("SELECT id, name FROM users WHERE telegram_chat_id = %s", (int(chat_id),))
         user = cur.fetchone()
         
         if not user:
-            bot.reply_to(message, f"Olá! Seu ID {chat_id} não foi encontrado.")
+            bot.reply_to(message, "Usuário não encontrado.")
             return
 
         data = process_with_ai(text)
         action = data.get('action') if data else 'chat'
         
         if action == 'add_expense':
-            # O banco preenche a data automaticamente conforme configuramos no Supabase
             cur.execute(
                 "INSERT INTO transactions (user_id, amount, category, description) VALUES (%s, %s, %s, %s)",
                 (user[0], data['amount'], data['category'], data['description'])
@@ -84,24 +68,35 @@ def handle_message(message):
             bot.reply_to(message, f"✅ Salvo, {user[1]}!\n💰 R$ {data['amount']:.2f} em {data['category']}")
         
         elif action == 'get_report':
-            # Filtra os gastos usando o dia atual no fuso de Salvador
-            cur.execute(
-                """
-                SELECT SUM(amount) FROM transactions 
-                WHERE user_id = %s 
-                AND date::date = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC' - INTERVAL '3 hours')::date
-                """, 
-                (user[0],)
-            )
+            period = data.get('period', 'today')
+            
+            # Lógica de datas baseada no fuso horário da Bahia
+            base_query = "SELECT SUM(amount) FROM transactions WHERE user_id = %s AND "
+            bahia_now = "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC' - INTERVAL '3 hours')"
+            
+            if period == 'yesterday':
+                query = base_query + f"date::date = ({bahia_now} - INTERVAL '1 day')::date"
+                label = "ontem"
+            elif period == 'week':
+                query = base_query + f"date >= date_trunc('week', {bahia_now})"
+                label = "esta semana"
+            elif period == 'month':
+                query = base_query + f"date >= date_trunc('month', {bahia_now})"
+                label = "este mês"
+            else: # today
+                query = base_query + f"date::date = {bahia_now}::date"
+                label = "hoje"
+
+            cur.execute(query, (user[0],))
             total = cur.fetchone()[0] or 0
-            bot.reply_to(message, f"📊 {user[1]}, seu total de hoje é:\n💰 R$ {total:.2f}")
+            bot.reply_to(message, f"📊 {user[1]}, seu gasto de {label} é:\n💰 R$ {total:.2f}")
             
         else:
             bot.reply_to(message, f"Oi {user[1]}! Como posso ajudar?")
 
     except Exception as e:
         print(f"Erro: {e}")
-        bot.reply_to(message, "Tive um problema técnico. Tente novamente em instantes.")
+        bot.reply_to(message, "Erro técnico. Tente novamente.")
     finally:
         if conn:
             cur.close()
