@@ -33,7 +33,9 @@ def process_with_ai(text):
                         "4. Fatura: {'action': 'add_bill', 'amount': float, 'description': str, 'month': str}\n"
                         "5. Listar Faturas: {'action': 'list_bills', 'month': str}\n"
                         "6. Pagar Fatura: {'action': 'pay_bill', 'description': str, 'month': str, 'bank': str}\n"
-                        "7. Relatórios: {'action': 'get_report', 'period': 'today'|'yesterday'|'week'|'month'}\n"
+                        "7. Relatórios Gerais: {'action': 'get_report', 'period': 'today'|'yesterday'|'week'|'month'}\n"
+                        "8. Relatório Categoria: {'action': 'report_category', 'category': str, 'period': 'today'|'week'|'month'}\n"
+                        "9. Listar Categorias: {'action': 'list_categories'}\n"
                         "Outros: {'action': 'chat'}"
                     )
                 },
@@ -99,6 +101,35 @@ def handle_message(message):
             conn.commit()
             bot.reply_to(message, f"✅ Gasto de R$ {data['amount']:.2f} salvo!")
 
+        # --- NOVAS FUNÇÕES: CATEGORIAS ---
+        elif action == 'report_category':
+            cat = data.get('category')
+            period = data.get('period', 'month')
+            
+            query = f"SELECT SUM(amount) FROM transactions WHERE user_id = %s AND category ILIKE %s AND "
+            if period == 'today':
+                query += f"date::date = {bahia_now}::date"
+                label = "hoje"
+            elif period == 'week':
+                query += f"date >= date_trunc('week', {bahia_now})"
+                label = "esta semana"
+            else:
+                query += f"date >= date_trunc('month', {bahia_now})"
+                label = "este mês"
+            
+            cur.execute(query, (user_id, f"%{cat}%"))
+            total = cur.fetchone()[0] or 0
+            bot.reply_to(message, f"🔍 Gastos com **{cat}** ({label}):\n💰 R$ {total:.2f}", parse_mode="Markdown")
+
+        elif action == 'list_categories':
+            cur.execute("SELECT DISTINCT category FROM transactions WHERE user_id = %s ORDER BY category", (user_id,))
+            cats = cur.fetchall()
+            if cats:
+                msg = "📂 **Suas categorias cadastradas:**\n" + "\n".join([f"• {c[0]}" for c in cats])
+                bot.reply_to(message, msg, parse_mode="Markdown")
+            else:
+                bot.reply_to(message, "Você ainda não tem categorias registradas.")
+
         # --- GESTÃO DE FATURAS ---
         elif action == 'add_bill':
             cur.execute("INSERT INTO scheduled_expenses (user_id, amount, description, is_active) VALUES (%s, %s, %s, true)",
@@ -113,7 +144,7 @@ def handle_message(message):
             faturas = cur.fetchall()
             if faturas:
                 lista = "\n".join([f"• {f[0]}: R$ {f[1]:.2f}" for f in faturas])
-                bot.reply_to(message, f"⏳ **Faturas pendentes ({mes}):**\n{lista}")
+                bot.reply_to(message, f"⏳ **Faturas pendentes ({mes}):**\n{lista}", parse_mode="Markdown")
             else:
                 bot.reply_to(message, f"✅ Nenhuma fatura pendente para {mes}.")
 
@@ -133,7 +164,7 @@ def handle_message(message):
             else:
                 bot.reply_to(message, "Fatura não encontrada.")
 
-        # --- OUTROS ---
+        # --- OUTROS RELATÓRIOS E SALDOS ---
         elif action == 'get_balance':
             cur.execute("SELECT bank_name, balance FROM accounts WHERE user_id = %s", (user_id,))
             rows = cur.fetchall()
@@ -141,9 +172,25 @@ def handle_message(message):
             bot.reply_to(message, f"Saldos:\n{msg}")
 
         elif action == 'get_report':
-            cur.execute(f"SELECT SUM(amount) FROM transactions WHERE user_id = %s AND date::date = {bahia_now}::date", (user_id,))
+            period = data.get('period', 'today')
+            base_query = "SELECT SUM(amount) FROM transactions WHERE user_id = %s AND "
+            
+            if period == 'yesterday':
+                query = base_query + f"date::date = ({bahia_now} - INTERVAL '1 day')::date"
+                label = "ontem"
+            elif period == 'week':
+                query = base_query + f"date >= date_trunc('week', {bahia_now})"
+                label = "esta semana"
+            elif period == 'month':
+                query = base_query + f"date >= date_trunc('month', {bahia_now})"
+                label = "este mês"
+            else:
+                query = base_query + f"date::date = {bahia_now}::date"
+                label = "hoje"
+                
+            cur.execute(query, (user_id,))
             total = cur.fetchone()[0] or 0
-            bot.reply_to(message, f"📊 Total de hoje: R$ {total:.2f}")
+            bot.reply_to(message, f"📊 Total de {label}: R$ {total:.2f}")
 
         else:
             bot.reply_to(message, f"Oi {user[1]}! Como posso ajudar?")
