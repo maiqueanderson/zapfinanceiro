@@ -36,6 +36,7 @@ def process_with_ai(text):
                         "7. Relatórios Gerais: {'action': 'get_report', 'period': 'today'|'yesterday'|'week'|'month'}\n"
                         "8. Relatório Categoria: {'action': 'report_category', 'category': str, 'period': 'today'|'week'|'month'}\n"
                         "9. Listar Categorias: {'action': 'list_categories'}\n"
+                        "10. Definir Meta: {'action': 'set_goal', 'amount': float, 'category': str}\n"
                         "Outros: {'action': 'chat'}"
                     )
                 },
@@ -82,7 +83,7 @@ def handle_message(message):
         action = data.get('action') if data else 'chat'
         bahia_now = "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC' - INTERVAL '3 hours')"
 
-        # --- AÇÕES DE GASTOS E RECEITAS ---
+        # --- AÇÕES DE GASTOS, RECEITAS E METAS ---
         if action == 'add_income':
             bank = data.get('bank', 'Geral')
             cur.execute("""
@@ -92,14 +93,44 @@ def handle_message(message):
             conn.commit()
             bot.reply_to(message, f"💰 R$ {data['amount']:.2f} adicionados ao {bank}!")
 
+        elif action == 'set_goal':
+            cur.execute("""
+                INSERT INTO category_goals (user_id, category, goal_amount) VALUES (%s, %s, %s)
+                ON CONFLICT (user_id, category) DO UPDATE SET goal_amount = EXCLUDED.goal_amount
+            """, (user_id, data['category'], data['amount']))
+            conn.commit()
+            bot.reply_to(message, f"🎯 Meta de R$ {data['amount']:.2f} para a categoria **{data['category']}** definida com sucesso!", parse_mode="Markdown")
+
         elif action == 'add_expense':
+            # 1. Salvar o gasto e atualizar o banco
             cur.execute("INSERT INTO transactions (user_id, amount, category, description) VALUES (%s, %s, %s, %s)",
                         (user_id, data['amount'], data['category'], data['description']))
             if data.get('bank'):
                 cur.execute("UPDATE accounts SET balance = balance - %s WHERE user_id = %s AND bank_name ILIKE %s",
                             (data['amount'], user_id, f"%{data['bank']}%"))
             conn.commit()
-            bot.reply_to(message, f"✅ Gasto de R$ {data['amount']:.2f} salvo!")
+            
+            reply_msg = f"✅ Gasto de R$ {data['amount']:.2f} salvo em {data['category']}!"
+
+            # 2. Checar se existe meta para essa categoria
+            cur.execute("SELECT goal_amount FROM category_goals WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{data['category']}%"))
+            goal_res = cur.fetchone()
+            
+            if goal_res:
+                meta = goal_res[0]
+                # 3. Calcular o total gasto na categoria no mês atual
+                cur.execute(f"SELECT SUM(amount) FROM transactions WHERE user_id = %s AND category ILIKE %s AND date >= date_trunc('month', {bahia_now})", 
+                            (user_id, f"%{data['category']}%"))
+                total_gasto = cur.fetchone()[0] or 0
+                
+                diferenca = meta - total_gasto
+                
+                if diferenca >= 0:
+                    reply_msg += f"\n🎯 Meta: Você ainda possui R$ {diferenca:.2f} para gastar nessa categoria."
+                else:
+                    reply_msg += f"\n⚠️ Atenção: Você ultrapassou R$ {abs(diferenca):.2f} da sua meta nessa categoria!"
+
+            bot.reply_to(message, reply_msg)
 
         # --- NOVAS FUNÇÕES: CATEGORIAS ---
         elif action == 'report_category':
@@ -193,7 +224,7 @@ def handle_message(message):
             bot.reply_to(message, f"📊 Total de {label}: R$ {total:.2f}")
 
         else:
-            bot.reply_to(message, f"Oi {user[1]}! Como posso ajudar?")
+            bot.reply_to(message, f"Oi Maique! Como posso ajudar?")
 
     except Exception as e:
         bot.reply_to(message, f"Erro: {e}")
