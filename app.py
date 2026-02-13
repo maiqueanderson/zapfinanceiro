@@ -30,13 +30,14 @@ def process_with_ai(text):
                         "1. Gasto: {'action': 'add_expense', 'amount': float, 'category': str, 'description': str, 'bank': str}\n"
                         "2. Receita: {'action': 'add_income', 'amount': float, 'bank': str, 'description': str}\n"
                         "3. Saldo: {'action': 'get_balance', 'bank': str}\n"
-                        "4. Fatura: {'action': 'add_bill', 'amount': float, 'description': str, 'month': str}\n"
-                        "5. Listar Faturas: {'action': 'list_bills', 'month': str}\n"
-                        "6. Pagar Fatura: {'action': 'pay_bill', 'description': str, 'month': str, 'bank': str}\n"
-                        "7. Relatórios Gerais: {'action': 'get_report', 'period': 'today'|'yesterday'|'week'|'month'}\n"
-                        "8. Relatório Categoria: {'action': 'report_category', 'category': str, 'period': 'today'|'week'|'month'}\n"
-                        "9. Listar Categorias: {'action': 'list_categories'}\n"
-                        "10. Definir Meta: {'action': 'set_goal', 'amount': float, 'category': str}\n"
+                        "4. Fatura ou Conta a Pagar: {'action': 'add_bill', 'amount': float, 'description': str, 'month': str}\n"
+                        "5. Listar Contas/Faturas: {'action': 'list_bills', 'month': str}\n"
+                        "6. Total Contas/Faturas: {'action': 'total_bills', 'month': str}\n"
+                        "7. Pagar Conta/Fatura: {'action': 'pay_bill', 'description': str, 'month': str, 'bank': str}\n"
+                        "8. Relatórios Gerais: {'action': 'get_report', 'period': 'today'|'yesterday'|'week'|'month'}\n"
+                        "9. Relatório Categoria: {'action': 'report_category', 'category': str, 'period': 'today'|'week'|'month'}\n"
+                        "10. Listar Categorias: {'action': 'list_categories'}\n"
+                        "11. Definir Meta: {'action': 'set_goal', 'amount': float, 'category': str}\n"
                         "Outros: {'action': 'chat'}"
                     )
                 },
@@ -102,7 +103,6 @@ def handle_message(message):
             bot.reply_to(message, f"🎯 Meta de R$ {data['amount']:.2f} para a categoria **{data['category']}** definida com sucesso!", parse_mode="Markdown")
 
         elif action == 'add_expense':
-            # 1. Salvar o gasto e atualizar o banco
             cur.execute("INSERT INTO transactions (user_id, amount, category, description) VALUES (%s, %s, %s, %s)",
                         (user_id, data['amount'], data['category'], data['description']))
             if data.get('bank'):
@@ -112,13 +112,11 @@ def handle_message(message):
             
             reply_msg = f"✅ Gasto de R$ {data['amount']:.2f} salvo em {data['category']}!"
 
-            # 2. Checar se existe meta para essa categoria
             cur.execute("SELECT goal_amount FROM category_goals WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{data['category']}%"))
             goal_res = cur.fetchone()
             
             if goal_res:
                 meta = goal_res[0]
-                # 3. Calcular o total gasto na categoria no mês atual
                 cur.execute(f"SELECT SUM(amount) FROM transactions WHERE user_id = %s AND category ILIKE %s AND date >= date_trunc('month', {bahia_now})", 
                             (user_id, f"%{data['category']}%"))
                 total_gasto = cur.fetchone()[0] or 0
@@ -126,9 +124,9 @@ def handle_message(message):
                 diferenca = meta - total_gasto
                 
                 if diferenca >= 0:
-                    reply_msg += f"\n🎯 Meta: Você ainda possui R$ {diferenca:.2f} para gastar nessa categoria."
+                    reply_msg += f"\n🎯 Meta: Você ainda possui R$ {diferenca:.2f} para gastar nesta categoria."
                 else:
-                    reply_msg += f"\n⚠️ Atenção: Você ultrapassou R$ {abs(diferenca):.2f} da sua meta nessa categoria!"
+                    reply_msg += f"\n⚠️ Atenção: Você ultrapassou R$ {abs(diferenca):.2f} da sua meta nesta categoria!"
 
             bot.reply_to(message, reply_msg)
 
@@ -159,14 +157,14 @@ def handle_message(message):
                 msg = "📂 **Suas categorias cadastradas:**\n" + "\n".join([f"• {c[0]}" for c in cats])
                 bot.reply_to(message, msg, parse_mode="Markdown")
             else:
-                bot.reply_to(message, "Você ainda não tem categorias registradas.")
+                bot.reply_to(message, "Você ainda não tem categorias registadas.")
 
-        # --- GESTÃO DE FATURAS ---
+        # --- GESTÃO DE CONTAS A PAGAR E FATURAS ---
         elif action == 'add_bill':
             cur.execute("INSERT INTO scheduled_expenses (user_id, amount, description, is_active) VALUES (%s, %s, %s, true)",
                         (user_id, data['amount'], f"{data['description']} - {data['month']}",))
             conn.commit()
-            bot.reply_to(message, f"💳 Fatura de {data['month']} anotada!")
+            bot.reply_to(message, f"🧾 Conta/Fatura de {data['month']} anotada com sucesso!")
 
         elif action == 'list_bills':
             mes = data.get('month') or datetime.now().strftime('%B')
@@ -175,9 +173,16 @@ def handle_message(message):
             faturas = cur.fetchall()
             if faturas:
                 lista = "\n".join([f"• {f[0]}: R$ {f[1]:.2f}" for f in faturas])
-                bot.reply_to(message, f"⏳ **Faturas pendentes ({mes}):**\n{lista}", parse_mode="Markdown")
+                bot.reply_to(message, f"⏳ **Contas a pagar pendentes ({mes}):**\n{lista}", parse_mode="Markdown")
             else:
-                bot.reply_to(message, f"✅ Nenhuma fatura pendente para {mes}.")
+                bot.reply_to(message, f"✅ Nenhuma conta a pagar pendente para {mes}.")
+
+        elif action == 'total_bills':
+            mes = data.get('month') or datetime.now().strftime('%B')
+            cur.execute("SELECT SUM(amount) FROM scheduled_expenses WHERE user_id = %s AND is_active = true AND description ILIKE %s",
+                        (user_id, f"%{mes}%"))
+            total = cur.fetchone()[0] or 0
+            bot.reply_to(message, f"💰 O valor total de contas a pagar pendentes para {mes} é:\nR$ {total:.2f}")
 
         elif action == 'pay_bill':
             desc, mes, bank = data.get('description', ''), data.get('month', ''), data.get('bank')
@@ -191,9 +196,9 @@ def handle_message(message):
                     cur.execute("UPDATE accounts SET balance = balance - %s WHERE user_id = %s AND bank_name ILIKE %s",
                                 (res[0], user_id, f"%{bank}%"))
                 conn.commit()
-                bot.reply_to(message, f"✔️ Fatura paga com {bank}!")
+                bot.reply_to(message, f"✔️ Conta paga com {bank}! O valor de R$ {res[0]:.2f} foi descontado do seu saldo.")
             else:
-                bot.reply_to(message, "Fatura não encontrada.")
+                bot.reply_to(message, "Conta a pagar não encontrada.")
 
         # --- OUTROS RELATÓRIOS E SALDOS ---
         elif action == 'get_balance':
