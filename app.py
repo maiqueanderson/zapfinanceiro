@@ -40,6 +40,20 @@ def process_with_ai(text):
         print(f"Erro IA: {e}")
         return None
 
+# --- ROTA QUE O RENDER PRECISA PARA STATUS 200 ---
+@app.route('/')
+def index():
+    return "Bot Financeiro ZapFinanceiro Online!", 200
+
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return '', 200
+    return '', 403
+
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
     chat_id = message.chat.id
@@ -69,8 +83,6 @@ def handle_message(message):
         
         elif action == 'get_report':
             period = data.get('period', 'today')
-            
-            # Lógica de datas baseada no fuso horário da Bahia
             base_query = "SELECT SUM(amount) FROM transactions WHERE user_id = %s AND "
             bahia_now = "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC' - INTERVAL '3 hours')"
             
@@ -83,7 +95,7 @@ def handle_message(message):
             elif period == 'month':
                 query = base_query + f"date >= date_trunc('month', {bahia_now})"
                 label = "este mês"
-            else: # today
+            else:
                 query = base_query + f"date::date = {bahia_now}::date"
                 label = "hoje"
 
@@ -92,7 +104,7 @@ def handle_message(message):
             bot.reply_to(message, f"📊 {user[1]}, seu gasto de {label} é:\n💰 R$ {total:.2f}")
             
         else:
-            bot.reply_to(message, f"Oi {user[1]}! Como posso ajudar?")
+            bot.reply_to(message, f"Oi {user[1]}! Como posso ajudar com suas finanças hoje?")
 
     except Exception as e:
         print(f"Erro: {e}")
@@ -103,5 +115,6 @@ def handle_message(message):
             conn.close()
 
 if __name__ == "__main__":
-    port = int(os.environ.get('PORT', 5000))
+    # Garante que o Flask use a porta que o Render fornecer
+    port = int(os.environ.get('PORT', 10000))
     app.run(host="0.0.0.0", port=port)
