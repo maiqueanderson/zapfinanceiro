@@ -4,6 +4,7 @@ from flask import Flask, request
 import psycopg2
 from groq import Groq
 import json
+import traceback
 from datetime import datetime, timedelta
 
 # --- CONFIGURAÇÕES ---
@@ -83,7 +84,7 @@ def webhook():
 def handle_message(message):
     global pending_user_actions
     chat_id = message.chat.id
-    text = message.text
+    text = message.text or ""
     conn = None
 
     try:
@@ -98,19 +99,33 @@ def handle_message(message):
 
         user_id = user[0]
         
-        # --- VERIFICAÇÃO DE MEMÓRIA (AÇÕES PENDENTES) ---
+        # Processa comando com a IA
         data = process_with_ai(text)
         action = data.get('action') if data else 'chat'
 
+        # --- BLINDAGEM CONTRA VALORES VAZIOS (NULL) DA IA ---
+        if data:
+            for key, value in data.items():
+                if value is None:
+                    data[key] = ""
+                elif isinstance(value, str):
+                    data[key] = value.strip()
+            
+            # Converter para maiúsculo campos específicos de forma segura
+            for key in ['category', 'old_category', 'new_category', 'bank', 'old_bank', 'new_bank']:
+                if data.get(key):
+                    data[key] = data[key].upper()
+
+        # --- VERIFICAÇÃO DE MEMÓRIA (AÇÕES PENDENTES) ---
         if user_id in pending_user_actions:
             if action == 'provide_bank' or action == 'chat':
-                banco_informado = data.get('bank') if action == 'provide_bank' else text.strip()
+                banco_informado = data.get('bank') if (action == 'provide_bank' and data.get('bank')) else text.strip()
                 
                 pending_data = pending_user_actions.pop(user_id)
                 pending_data['bank'] = banco_informado.upper()
                 
                 data = pending_data
-                action = data['action']
+                action = data.get('action')
             else:
                 pending_user_actions.pop(user_id, None)
         
@@ -120,15 +135,9 @@ def handle_message(message):
         meses_pt = {1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril', 5: 'Maio', 6: 'Junho', 
                     7: 'Julho', 8: 'Agosto', 9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'}
 
-        # --- PADRONIZADOR UNIVERSAL PARA MAIÚSCULO (CATEGORIAS E BANCOS) ---
-        if data:
-            for key in ['category', 'old_category', 'new_category', 'bank', 'old_bank', 'new_bank']:
-                if data.get(key):
-                    data[key] = str(data[key]).upper().strip()
-
         # --- TRADUTOR AUTOMÁTICO DE MESES ---
         if data and data.get('month'):
-            mes_original = str(data['month']).lower().strip()
+            mes_original = str(data['month']).lower()
             traducao_meses = {
                 'january': 'Janeiro', 'february': 'Fevereiro', 'march': 'Março', 'april': 'Abril',
                 'may': 'Maio', 'june': 'Junho', 'july': 'Julho', 'august': 'Agosto',
@@ -157,7 +166,6 @@ def handle_message(message):
             new_bank = data.get('new_bank')
             
             cur.execute("UPDATE accounts SET bank_name = %s WHERE user_id = %s AND bank_name ILIKE %s", (new_bank, user_id, f"%{old_bank}%"))
-            
             if cur.rowcount > 0:
                 conn.commit()
                 bot.reply_to(message, f"✏️ O banco **{old_bank}** foi alterado para **{new_bank}** com sucesso!", parse_mode="Markdown")
@@ -200,17 +208,15 @@ def handle_message(message):
 
         elif action == 'delete_category':
             cat = data.get('category')
-            
             cur.execute("UPDATE transactions SET category = 'GERAL' WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{cat}%"))
             trans_count = cur.rowcount
             cur.execute("DELETE FROM category_goals WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{cat}%"))
             
             conn.commit()
             if trans_count > 0 or cur.rowcount > 0:
-                bot.reply_to(message, f"🗑️ Categoria **{cat}** deletada!\n⚠️ *Para não bagunçar seus relatórios, os gastos antigos que estavam nela foram movidos para a categoria 'GERAL'.*", parse_mode="Markdown")
+                bot.reply_to(message, f"🗑️ Categoria **{cat}** deletada!\n⚠️ *Para não bagunçar seus relatórios, os gastos antigos foram movidos para a categoria 'GERAL'.*", parse_mode="Markdown")
             else:
                 bot.reply_to(message, f"❌ Não encontrei a categoria **{cat}** para deletar.", parse_mode="Markdown")
-
 
         # --- FUNÇÃO: APAGAR ÚLTIMO GASTO ---
         elif action == 'delete_last':
@@ -218,13 +224,10 @@ def handle_message(message):
             last_tx = cur.fetchone()
             
             if last_tx:
-                tx_id = last_tx[0]
-                valor = last_tx[1]
-                desc = last_tx[2]
-                
+                tx_id, valor, desc = last_tx
                 cur.execute("DELETE FROM transactions WHERE id = %s", (tx_id,))
                 conn.commit()
-                bot.reply_to(message, f"🗑️ **Último gasto apagado com sucesso!**\n\n💸 Descrição: {desc}\n💰 Valor: R$ {valor:.2f}\n\n⚠️ *Dica: Se este gasto havia descontado saldo de algum banco, lembre-se de adicionar o valor de volta manualmente.*", parse_mode="Markdown")
+                bot.reply_to(message, f"🗑️ **Último gasto apagado com sucesso!**\n\n💸 Descrição: {desc}\n💰 Valor: R$ {valor:.2f}\n\n⚠️ *Dica: Se este gasto descontou saldo do banco, lembre-se de adicionar o valor de volta manualmente.*", parse_mode="Markdown")
             else:
                 bot.reply_to(message, "Não encontrei nenhum gasto recente para apagar.")
 
@@ -232,6 +235,8 @@ def handle_message(message):
         elif action == 'delete_bill':
             desc = data.get('description', '')
             mes = data.get('month', '')
+            if not mes:
+                mes = meses_pt[hoje.month]
             
             cur.execute("SELECT id, amount FROM scheduled_expenses WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s",
                         (user_id, f"%{desc}%", f"%{mes}%"))
@@ -240,9 +245,9 @@ def handle_message(message):
             if res:
                 cur.execute("DELETE FROM scheduled_expenses WHERE id = %s", (res[0],))
                 conn.commit()
-                bot.reply_to(message, f"🗑️ A conta/fatura **'{desc}'** do mês de **{mes}** (R$ {res[1]:.2f}) foi excluída com sucesso!", parse_mode="Markdown")
+                bot.reply_to(message, f"🗑️ A conta/fatura **'{desc}'** do mês de **{mes}** foi excluída com sucesso!", parse_mode="Markdown")
             else:
-                bot.reply_to(message, f"❌ Não encontrei nenhuma conta/fatura com o nome '{desc}' no mês de {mes} para apagar.")
+                bot.reply_to(message, f"❌ Não encontrei nenhuma conta/fatura '{desc}' no mês de {mes} para apagar.")
 
         # --- FUNÇÃO: COMPRA PARCELADA ---
         elif action == 'add_installment':
@@ -252,20 +257,18 @@ def handle_message(message):
             cartao = data.get('card', 'CARTÃO')
             
             valor_parcela = total / parcelas
-            
             for i in range(parcelas):
                 m = hoje.month + i + 1
                 ano = hoje.year + (m - 1) // 12
                 mes_num = (m - 1) % 12 + 1
                 nome_mes_ano = f"{meses_pt[mes_num]}/{ano}"
-                
                 desc_completa = f"{desc} (Parcela {i+1}/{parcelas}) - Fatura {cartao} - {nome_mes_ano}"
                 
                 cur.execute("INSERT INTO scheduled_expenses (user_id, amount, description, is_active) VALUES (%s, %s, %s, true)",
                             (user_id, valor_parcela, desc_completa))
             
             conn.commit()
-            bot.reply_to(message, f"💳 Compra parcelada de R$ {total:.2f} anotada!\nDividida em {parcelas}x de R$ {valor_parcela:.2f} no cartão {cartao}, começando a partir do próximo mês.")
+            bot.reply_to(message, f"💳 Compra parcelada de R$ {total:.2f} anotada!\nDividida em {parcelas}x de R$ {valor_parcela:.2f} no cartão {cartao}, começando no próximo mês.")
 
         # --- AÇÕES DE GASTOS, RECEITAS E METAS ---
         elif action == 'add_income':
@@ -286,8 +289,7 @@ def handle_message(message):
             bot.reply_to(message, f"🎯 Meta de R$ {data['amount']:.2f} para a categoria **{data['category']}** definida com sucesso!", parse_mode="Markdown")
 
         elif action == 'add_expense':
-            # TRAVA DE SEGURANÇA: Exigir o banco
-            if not data.get('bank') or str(data.get('bank')) in ['NONE', 'NULL', '']:
+            if not data.get('bank') or data.get('bank') == '':
                 pending_user_actions[user_id] = data
                 bot.reply_to(message, "🏦 Você esqueceu de me dizer o banco! De qual banco devo descontar esse gasto?")
                 return
@@ -319,30 +321,27 @@ def handle_message(message):
             bot.reply_to(message, reply_msg)
 
         elif action == 'check_goal':
-            cat = data.get('category')
-            
+            cat = data.get('category', '')
+            if not cat:
+                bot.reply_to(message, "❌ Diga o nome da categoria que deseja consultar.")
+                return
+
             cur.execute("SELECT goal_amount FROM category_goals WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{cat}%"))
             goal_res = cur.fetchone()
             
             if goal_res:
                 meta = float(goal_res[0])
-                
                 cur.execute(f"SELECT SUM(amount) FROM transactions WHERE user_id = %s AND category ILIKE %s AND date >= date_trunc('month', {bahia_now})", 
                             (user_id, f"%{cat}%"))
                 total_gasto = float(cur.fetchone()[0] or 0)
-                
                 restante = meta - total_gasto
                 
-                meta_fmt = f"{meta:.2f}".replace('.', ',')
-                gasto_fmt = f"{total_gasto:.2f}".replace('.', ',')
-                restante_fmt = f"{restante:.2f}".replace('.', ',')
-                
                 mensagem = f"🎯 **Resumo da Meta: {cat}**\n\n"
-                mensagem += f"🔸 **Sua Meta:** R$ {meta_fmt}\n"
-                mensagem += f"💸 **Total Gasto:** R$ {gasto_fmt}\n"
+                mensagem += f"🔸 **Sua Meta:** R$ {meta:.2f}\n".replace('.', ',')
+                mensagem += f"💸 **Total Gasto:** R$ {total_gasto:.2f}\n".replace('.', ',')
                 
                 if restante >= 0:
-                    mensagem += f"✅ **Ainda pode gastar:** R$ {restante_fmt}"
+                    mensagem += f"✅ **Ainda pode gastar:** R$ {restante:.2f}".replace('.', ',')
                 else:
                     mensagem += f"⚠️ **Passou da meta em:** R$ {abs(restante):.2f}".replace('.', ',')
                     
@@ -365,20 +364,14 @@ def handle_message(message):
                     gasto = float(cur.fetchone()[0] or 0)
                     restante = meta - gasto
                     
-                    meta_str = f"{meta:.2f}".replace('.', ',')
-                    restante_str = f"{restante:.2f}".replace('.', ',')
-                    
-                    mensagem += f"🔸 **{cat}** (Meta: R$ {meta_str})\n"
-                    
+                    mensagem += f"🔸 **{cat}** (Meta: R$ {meta:.2f})\n".replace('.', ',')
                     if restante >= 0:
-                        mensagem += f"✅ Resta: R$ {restante_str}\n\n"
+                        mensagem += f"✅ Resta: R$ {restante:.2f}\n\n".replace('.', ',')
                         total_livre += restante 
                     else:
-                        mensagem += f"⚠️ Ultrapassou: -R$ {abs(restante):.2f}".replace('.', ',') + "\n\n"
+                        mensagem += f"⚠️ Ultrapassou: -R$ {abs(restante):.2f}\n\n".replace('.', ',')
                 
-                total_livre_str = f"{total_livre:.2f}".replace('.', ',')
-                mensagem += f"✅ **Valor total a ser gasto em todas as metas:** R$ {total_livre_str}"
-                
+                mensagem += f"✅ **Valor total a ser gasto em todas as metas:** R$ {total_livre:.2f}".replace('.', ',')
                 bot.reply_to(message, mensagem, parse_mode="Markdown")
             else:
                 bot.reply_to(message, "Você ainda não tem metas cadastradas.")
@@ -434,10 +427,8 @@ def handle_message(message):
             if faturas:
                 agrupado = {}
                 total_mes = 0.0
-                
                 for desc, amount in faturas:
                     if " - FATURA " in desc.upper():
-                        # Separa garantindo a formatação original do nome
                         chave = "Fatura " + desc.upper().split(" - FATURA ")[1]
                     else:
                         chave = desc
@@ -447,9 +438,7 @@ def handle_message(message):
                     total_mes += valor
 
                 lista = "\n".join([f"• {k}: R$ {v:.2f}".replace('.', ',') for k, v in agrupado.items()])
-                total_formatado = f"{total_mes:.2f}".replace('.', ',')
-                
-                mensagem = f"⏳ **Contas a pagar pendentes ({mes}):**\n{lista}\n\n✅ **Valor total a ser pago:** R$ {total_formatado}"
+                mensagem = f"⏳ **Contas a pagar pendentes ({mes}):**\n{lista}\n\n✅ **Valor total a ser pago:** R$ {total_mes:.2f}".replace('.', ',')
                 bot.reply_to(message, mensagem, parse_mode="Markdown")
             else:
                 bot.reply_to(message, f"✅ Nenhuma conta a pagar pendente para {mes}.")
@@ -462,13 +451,18 @@ def handle_message(message):
             bot.reply_to(message, f"💰 O valor total de contas a pagar pendentes para {mes} é:\nR$ {total:.2f}".replace('.', ','))
 
         elif action == 'pay_bill':
-            # TRAVA DE SEGURANÇA: Exigir o banco
-            if not data.get('bank') or str(data.get('bank')) in ['NONE', 'NULL', '']:
+            if not data.get('bank') or data.get('bank') == '':
                 pending_user_actions[user_id] = data
                 bot.reply_to(message, "🏦 Faltou o banco! De qual banco devo descontar o pagamento desta conta/fatura?")
                 return
 
-            desc, mes, bank = data.get('description', ''), data.get('month', ''), data.get('bank')
+            desc = data.get('description', '')
+            mes = data.get('month', '')
+            bank = data.get('bank', '')
+            
+            if not mes:
+                mes = meses_pt[hoje.month]
+
             cur.execute("SELECT SUM(amount) FROM scheduled_expenses WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s AND is_active = true",
                         (user_id, f"%{desc}%", f"%{mes}%"))
             res = cur.fetchone()
@@ -482,13 +476,16 @@ def handle_message(message):
                 conn.commit()
                 bot.reply_to(message, f"✔️ Fatura/Conta paga com {bank}! O valor total de R$ {total_pago:.2f} foi descontado do seu saldo.")
             else:
-                bot.reply_to(message, "Conta a pagar não encontrada.")
+                bot.reply_to(message, f"Conta a pagar não encontrada para o mês de {mes}.")
 
         elif action == 'update_bill':
             desc = data.get('description', '')
             mes = data.get('month', '')
             novo_valor = data.get('new_amount', 0.0)
             
+            if not mes:
+                mes = meses_pt[hoje.month]
+
             cur.execute("SELECT id FROM scheduled_expenses WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s AND is_active = true",
                         (user_id, f"%{desc}%", f"%{mes}%"))
             res = cur.fetchone()
@@ -508,9 +505,7 @@ def handle_message(message):
             if rows:
                 total_saldo = sum([float(r[1]) for r in rows])
                 msg = "\n".join([f"🏦 {r[0]}: R$ {float(r[1]):.2f}".replace('.', ',') for r in rows])
-                total_formatado = f"{total_saldo:.2f}".replace('.', ',')
-                
-                resposta = f"💰 **Seus Saldos:**\n{msg}\n\n✅ **Saldo total:** R$ {total_formatado}"
+                resposta = f"💰 **Seus Saldos:**\n{msg}\n\n✅ **Saldo total:** R$ {total_saldo:.2f}".replace('.', ',')
                 bot.reply_to(message, resposta, parse_mode="Markdown")
             else:
                 bot.reply_to(message, "Você ainda não tem saldos cadastrados nos bancos.")
@@ -540,7 +535,9 @@ def handle_message(message):
             bot.reply_to(message, f"Oi Maique! Como posso ajudar?")
 
     except Exception as e:
-        bot.reply_to(message, f"Erro: {e}")
+        erro_msg = traceback.format_exc()
+        print(f"Erro Crítico: {erro_msg}")
+        bot.reply_to(message, "Oops! Houve um erro interno ao tentar processar o seu comando. Tente novamente!")
     finally:
         if conn:
             cur.close()
