@@ -4,7 +4,7 @@ from flask import Flask, request
 import psycopg2
 from groq import Groq
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # --- CONFIGURAÇÕES ---
 TOKEN = os.environ.get('TELEGRAM_TOKEN')
@@ -30,15 +30,16 @@ def process_with_ai(text):
                         "1. Gasto: {'action': 'add_expense', 'amount': float, 'category': str, 'description': str, 'bank': str}\n"
                         "2. Receita: {'action': 'add_income', 'amount': float, 'bank': str, 'description': str}\n"
                         "3. Saldo: {'action': 'get_balance', 'bank': str}\n"
-                        "4. Fatura ou Conta a Pagar: {'action': 'add_bill', 'amount': float, 'description': str, 'month': str}\n"
-                        "5. Listar Contas/Faturas: {'action': 'list_bills', 'month': str}\n"
-                        "6. Total Contas/Faturas: {'action': 'total_bills', 'month': str}\n"
-                        "7. Pagar Conta/Fatura: {'action': 'pay_bill', 'description': str, 'month': str, 'bank': str}\n"
-                        "8. Relatórios Gerais: {'action': 'get_report', 'period': 'today'|'yesterday'|'week'|'month'}\n"
-                        "9. Relatório Categoria: {'action': 'report_category', 'category': str, 'period': 'today'|'week'|'month'}\n"
-                        "10. Listar Categorias: {'action': 'list_categories'}\n"
-                        "11. Definir Meta: {'action': 'set_goal', 'amount': float, 'category': str}\n"
-                        "12. Alterar Valor de Fatura/Conta: {'action': 'update_bill', 'description': str, 'month': str, 'new_amount': float}\n"
+                        "4. Fatura Simples ou Conta: {'action': 'add_bill', 'amount': float, 'description': str, 'month': str}\n"
+                        "5. Compra Parcelada: {'action': 'add_installment', 'total_amount': float, 'installments': int, 'description': str, 'card': str}\n"
+                        "6. Listar Contas/Faturas: {'action': 'list_bills', 'month': str}\n"
+                        "7. Total Contas/Faturas: {'action': 'total_bills', 'month': str}\n"
+                        "8. Pagar Conta/Fatura: {'action': 'pay_bill', 'description': str, 'month': str, 'bank': str}\n"
+                        "9. Relatórios Gerais: {'action': 'get_report', 'period': 'today'|'yesterday'|'week'|'month'}\n"
+                        "10. Relatório Categoria: {'action': 'report_category', 'category': str, 'period': 'today'|'week'|'month'}\n"
+                        "11. Listar Categorias: {'action': 'list_categories'}\n"
+                        "12. Definir Meta: {'action': 'set_goal', 'amount': float, 'category': str}\n"
+                        "13. Alterar Valor de Fatura/Conta: {'action': 'update_bill', 'description': str, 'month': str, 'new_amount': float}\n"
                         "Outros: {'action': 'chat'}"
                     )
                 },
@@ -83,10 +84,40 @@ def handle_message(message):
         user_id = user[0]
         data = process_with_ai(text)
         action = data.get('action') if data else 'chat'
+        
+        # Horário local para garantir precisão nas datas
+        hoje = datetime.utcnow() - timedelta(hours=3)
         bahia_now = "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC' - INTERVAL '3 hours')"
 
+        # --- NOVA FUNÇÃO: COMPRA PARCELADA ---
+        if action == 'add_installment':
+            total = data.get('total_amount', 0.0)
+            parcelas = data.get('installments', 1)
+            desc = data.get('description', 'Compra')
+            cartao = data.get('card', 'Cartão')
+            
+            valor_parcela = total / parcelas
+            meses_pt = {1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril', 5: 'Maio', 6: 'Junho', 
+                        7: 'Julho', 8: 'Agosto', 9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'}
+            
+            # Loop matemático para calcular a travessia de meses e anos
+            for i in range(parcelas):
+                m = hoje.month + i
+                ano = hoje.year + (m - 1) // 12
+                mes_num = (m - 1) % 12 + 1
+                nome_mes_ano = f"{meses_pt[mes_num]}/{ano}"
+                
+                # Exemplo: "Televisão (Parcela 1/10) - Fatura Mercado Pago - Fevereiro/2026"
+                desc_completa = f"{desc} (Parcela {i+1}/{parcelas}) - Fatura {cartao} - {nome_mes_ano}"
+                
+                cur.execute("INSERT INTO scheduled_expenses (user_id, amount, description, is_active) VALUES (%s, %s, %s, true)",
+                            (user_id, valor_parcela, desc_completa))
+            
+            conn.commit()
+            bot.reply_to(message, f"💳 Compra parcelada de R$ {total:.2f} anotada!\nDividida em {parcelas}x de R$ {valor_parcela:.2f} no cartão {cartao}.")
+
         # --- AÇÕES DE GASTOS, RECEITAS E METAS ---
-        if action == 'add_income':
+        elif action == 'add_income':
             bank = data.get('bank', 'Geral')
             cur.execute("""
                 INSERT INTO accounts (user_id, bank_name, balance) VALUES (%s, %s, %s) 
@@ -121,7 +152,6 @@ def handle_message(message):
                 cur.execute(f"SELECT SUM(amount) FROM transactions WHERE user_id = %s AND category ILIKE %s AND date >= date_trunc('month', {bahia_now})", 
                             (user_id, f"%{data['category']}%"))
                 total_gasto = cur.fetchone()[0] or 0
-                
                 diferenca = meta - total_gasto
                 
                 if diferenca >= 0:
@@ -168,7 +198,7 @@ def handle_message(message):
             bot.reply_to(message, f"🧾 Conta/Fatura de {data['month']} anotada com sucesso!")
 
         elif action == 'list_bills':
-            mes = data.get('month') or datetime.now().strftime('%B')
+            mes = data.get('month') or hoje.strftime('%B')
             cur.execute("SELECT description, amount FROM scheduled_expenses WHERE user_id = %s AND is_active = true AND description ILIKE %s",
                         (user_id, f"%{mes}%"))
             faturas = cur.fetchall()
@@ -179,7 +209,7 @@ def handle_message(message):
                 bot.reply_to(message, f"✅ Nenhuma conta a pagar pendente para {mes}.")
 
         elif action == 'total_bills':
-            mes = data.get('month') or datetime.now().strftime('%B')
+            mes = data.get('month') or hoje.strftime('%B')
             cur.execute("SELECT SUM(amount) FROM scheduled_expenses WHERE user_id = %s AND is_active = true AND description ILIKE %s",
                         (user_id, f"%{mes}%"))
             total = cur.fetchone()[0] or 0
@@ -187,27 +217,27 @@ def handle_message(message):
 
         elif action == 'pay_bill':
             desc, mes, bank = data.get('description', ''), data.get('month', ''), data.get('bank')
-            cur.execute("SELECT amount FROM scheduled_expenses WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s AND is_active = true",
+            # Alteração principal: Agora somamos todas as parcelas e contas que batem com a pesquisa para abater do banco
+            cur.execute("SELECT SUM(amount) FROM scheduled_expenses WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s AND is_active = true",
                         (user_id, f"%{desc}%", f"%{mes}%"))
             res = cur.fetchone()
-            if res:
-                cur.execute("UPDATE scheduled_expenses SET is_active = false WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s",
+            if res and res[0] is not None:
+                total_pago = res[0]
+                cur.execute("UPDATE scheduled_expenses SET is_active = false WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s AND is_active = true",
                             (user_id, f"%{desc}%", f"%{mes}%"))
                 if bank:
                     cur.execute("UPDATE accounts SET balance = balance - %s WHERE user_id = %s AND bank_name ILIKE %s",
-                                (res[0], user_id, f"%{bank}%"))
+                                (total_pago, user_id, f"%{bank}%"))
                 conn.commit()
-                bot.reply_to(message, f"✔️ Conta paga com {bank}! O valor de R$ {res[0]:.2f} foi descontado do seu saldo.")
+                bot.reply_to(message, f"✔️ Fatura/Conta paga com {bank}! O valor total de R$ {total_pago:.2f} foi descontado do seu saldo.")
             else:
                 bot.reply_to(message, "Conta a pagar não encontrada.")
 
-        # --- NOVA FUNÇÃO: ALTERAR VALOR DA FATURA/CONTA ---
         elif action == 'update_bill':
             desc = data.get('description', '')
             mes = data.get('month', '')
             novo_valor = data.get('new_amount', 0.0)
             
-            # Busca a conta específica que ainda está ativa
             cur.execute("SELECT id FROM scheduled_expenses WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s AND is_active = true",
                         (user_id, f"%{desc}%", f"%{mes}%"))
             res = cur.fetchone()
