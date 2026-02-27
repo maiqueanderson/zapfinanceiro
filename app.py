@@ -218,16 +218,23 @@ def handle_message(message):
             faturas = cur.fetchall()
             if faturas:
                 agrupado = {}
+                total_mes = 0.0
+                
                 for desc, amount in faturas:
                     if " - Fatura " in desc:
                         chave = "Fatura " + desc.split(" - Fatura ")[1]
                     else:
                         chave = desc
                     
-                    agrupado[chave] = agrupado.get(chave, 0) + float(amount)
+                    valor = float(amount)
+                    agrupado[chave] = agrupado.get(chave, 0) + valor
+                    total_mes += valor
 
-                lista = "\n".join([f"• {k}: R$ {v:.2f}" for k, v in agrupado.items()])
-                bot.reply_to(message, f"⏳ **Contas a pagar pendentes ({mes}):**\n{lista}", parse_mode="Markdown")
+                lista = "\n".join([f"• {k}: R$ {v:.2f}".replace('.', ',') for k, v in agrupado.items()])
+                total_formatado = f"{total_mes:.2f}".replace('.', ',')
+                
+                mensagem = f"⏳ **Contas a pagar pendentes ({mes}):**\n{lista}\n\n✅ **Valor total a ser pago:** R$ {total_formatado}"
+                bot.reply_to(message, mensagem, parse_mode="Markdown")
             else:
                 bot.reply_to(message, f"✅ Nenhuma conta a pagar pendente para {mes}.")
 
@@ -236,7 +243,7 @@ def handle_message(message):
             cur.execute("SELECT SUM(amount) FROM scheduled_expenses WHERE user_id = %s AND is_active = true AND description ILIKE %s",
                         (user_id, f"%{mes}%"))
             total = cur.fetchone()[0] or 0
-            bot.reply_to(message, f"💰 O valor total de contas a pagar pendentes para {mes} é:\nR$ {total:.2f}")
+            bot.reply_to(message, f"💰 O valor total de contas a pagar pendentes para {mes} é:\nR$ {total:.2f}".replace('.', ','))
 
         elif action == 'pay_bill':
             desc, mes, bank = data.get('description', ''), data.get('month', ''), data.get('bank')
@@ -271,12 +278,20 @@ def handle_message(message):
             else:
                 bot.reply_to(message, f"❌ Não encontrei nenhuma fatura ou conta pendente de '{desc}' no mês de {mes}.")
 
-        # --- OUTROS RELATÓRIOS E SALDOS ---
+        # --- CONSULTA DE SALDO CORRIGIDA COM O TOTAL ---
         elif action == 'get_balance':
             cur.execute("SELECT bank_name, balance FROM accounts WHERE user_id = %s", (user_id,))
             rows = cur.fetchall()
-            msg = "\n".join([f"🏦 {r[0]}: R$ {r[1]:.2f}" for r in rows]) if rows else "Nenhum saldo."
-            bot.reply_to(message, f"Saldos:\n{msg}")
+            
+            if rows:
+                total_saldo = sum([float(r[1]) for r in rows])
+                msg = "\n".join([f"🏦 {r[0]}: R$ {float(r[1]):.2f}".replace('.', ',') for r in rows])
+                total_formatado = f"{total_saldo:.2f}".replace('.', ',')
+                
+                resposta = f"💰 **Seus Saldos:**\n{msg}\n\n✅ **Saldo total:** R$ {total_formatado}"
+                bot.reply_to(message, resposta, parse_mode="Markdown")
+            else:
+                bot.reply_to(message, "Você ainda não tem saldos cadastrados nos bancos.")
 
         elif action == 'get_report':
             period = data.get('period', 'today')
