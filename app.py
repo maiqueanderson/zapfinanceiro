@@ -52,6 +52,8 @@ def process_with_ai(text):
                         "20. Alterar Categoria: {'action': 'update_category', 'old_category': str, 'new_category': str}\n"
                         "21. Deletar Categoria: {'action': 'delete_category', 'category': str}\n"
                         "22. Informar Apenas o Banco: {'action': 'provide_bank', 'bank': str}\n"
+                        "23. Criar Banco: {'action': 'create_bank', 'bank': str}\n"
+                        "24. Alterar Banco: {'action': 'update_bank', 'old_bank': str, 'new_bank': str}\n"
                         "Outros: {'action': 'chat'}"
                     )
                 },
@@ -102,18 +104,14 @@ def handle_message(message):
 
         if user_id in pending_user_actions:
             if action == 'provide_bank' or action == 'chat':
-                # O usuário respondeu com o nome do banco
                 banco_informado = data.get('bank') if action == 'provide_bank' else text.strip()
                 
-                # Resgata a ação pausada e adiciona o banco
                 pending_data = pending_user_actions.pop(user_id)
-                pending_data['bank'] = banco_informado
+                pending_data['bank'] = banco_informado.upper()
                 
-                # Sobrescreve as variáveis para o fluxo continuar normalmente
                 data = pending_data
                 action = data['action']
             else:
-                # O usuário ignorou a pergunta do banco e mandou outro comando, então limpamos a memória
                 pending_user_actions.pop(user_id, None)
         
         hoje = datetime.utcnow() - timedelta(hours=3)
@@ -122,9 +120,9 @@ def handle_message(message):
         meses_pt = {1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril', 5: 'Maio', 6: 'Junho', 
                     7: 'Julho', 8: 'Agosto', 9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'}
 
-        # --- PADRONIZADOR DE CATEGORIAS PARA MAIÚSCULO ---
+        # --- PADRONIZADOR UNIVERSAL PARA MAIÚSCULO (CATEGORIAS E BANCOS) ---
         if data:
-            for key in ['category', 'old_category', 'new_category']:
+            for key in ['category', 'old_category', 'new_category', 'bank', 'old_bank', 'new_bank']:
                 if data.get(key):
                     data[key] = str(data[key]).upper().strip()
 
@@ -144,8 +142,39 @@ def handle_message(message):
             else:
                 data['month'] = mes_original.capitalize()
 
-        # --- NOVAS FUNÇÕES DE GESTÃO DE CATEGORIAS ---
-        if action == 'create_category':
+        # --- GESTÃO DE BANCOS ---
+        if action == 'create_bank':
+            banco = data.get('bank')
+            cur.execute("""
+                INSERT INTO accounts (user_id, bank_name, balance) VALUES (%s, %s, 0)
+                ON CONFLICT (user_id, bank_name) DO NOTHING
+            """, (user_id, banco))
+            conn.commit()
+            bot.reply_to(message, f"✅ Banco **{banco}** criado com sucesso e pronto para uso!", parse_mode="Markdown")
+
+        elif action == 'update_bank':
+            old_bank = data.get('old_bank')
+            new_bank = data.get('new_bank')
+            
+            cur.execute("UPDATE accounts SET bank_name = %s WHERE user_id = %s AND bank_name ILIKE %s", (new_bank, user_id, f"%{old_bank}%"))
+            
+            if cur.rowcount > 0:
+                conn.commit()
+                bot.reply_to(message, f"✏️ O banco **{old_bank}** foi alterado para **{new_bank}** com sucesso!", parse_mode="Markdown")
+            else:
+                bot.reply_to(message, f"❌ Não encontrei o banco **{old_bank}** para alterar.", parse_mode="Markdown")
+
+        elif action == 'delete_bank':
+            banco = data.get('bank', '')
+            cur.execute("DELETE FROM accounts WHERE user_id = %s AND bank_name ILIKE %s", (user_id, f"%{banco}%"))
+            if cur.rowcount > 0:
+                conn.commit()
+                bot.reply_to(message, f"🏦 A conta do banco **{banco}** foi apagada com sucesso!", parse_mode="Markdown")
+            else:
+                bot.reply_to(message, f"❌ Não encontrei nenhum banco com o nome **{banco}** para apagar.", parse_mode="Markdown")
+
+        # --- GESTÃO DE CATEGORIAS ---
+        elif action == 'create_category':
             cat = data.get('category')
             cur.execute("""
                 INSERT INTO category_goals (user_id, category, goal_amount) VALUES (%s, %s, 0)
@@ -195,7 +224,7 @@ def handle_message(message):
                 
                 cur.execute("DELETE FROM transactions WHERE id = %s", (tx_id,))
                 conn.commit()
-                bot.reply_to(message, f"🗑️ **Último gasto apagado com sucesso!**\n\n💸 Descrição: {desc}\n💰 Valor: R$ {valor:.2f}\n\n⚠️ *Dica: Se este gasto havia descontado saldo de algum banco, lembre-se de adicionar o valor de volta manualmente (ex: 'Adicione {valor:.2f} no Nubank').*", parse_mode="Markdown")
+                bot.reply_to(message, f"🗑️ **Último gasto apagado com sucesso!**\n\n💸 Descrição: {desc}\n💰 Valor: R$ {valor:.2f}\n\n⚠️ *Dica: Se este gasto havia descontado saldo de algum banco, lembre-se de adicionar o valor de volta manualmente.*", parse_mode="Markdown")
             else:
                 bot.reply_to(message, "Não encontrei nenhum gasto recente para apagar.")
 
@@ -215,24 +244,12 @@ def handle_message(message):
             else:
                 bot.reply_to(message, f"❌ Não encontrei nenhuma conta/fatura com o nome '{desc}' no mês de {mes} para apagar.")
 
-        # --- FUNÇÃO: APAGAR BANCO ---
-        elif action == 'delete_bank':
-            banco = data.get('bank', '')
-            
-            cur.execute("DELETE FROM accounts WHERE user_id = %s AND bank_name ILIKE %s", (user_id, f"%{banco}%"))
-            
-            if cur.rowcount > 0:
-                conn.commit()
-                bot.reply_to(message, f"🏦 A conta do banco **{banco.capitalize()}** foi apagada com sucesso!", parse_mode="Markdown")
-            else:
-                bot.reply_to(message, f"❌ Não encontrei nenhum banco com o nome **{banco.capitalize()}** para apagar.")
-
         # --- FUNÇÃO: COMPRA PARCELADA ---
         elif action == 'add_installment':
             total = data.get('total_amount', 0.0)
             parcelas = data.get('installments', 1)
             desc = data.get('description', 'Compra')
-            cartao = data.get('card', 'Cartão')
+            cartao = data.get('card', 'CARTÃO')
             
             valor_parcela = total / parcelas
             
@@ -252,7 +269,7 @@ def handle_message(message):
 
         # --- AÇÕES DE GASTOS, RECEITAS E METAS ---
         elif action == 'add_income':
-            bank = data.get('bank', 'Geral')
+            bank = data.get('bank', 'GERAL')
             cur.execute("""
                 INSERT INTO accounts (user_id, bank_name, balance) VALUES (%s, %s, %s) 
                 ON CONFLICT (user_id, bank_name) DO UPDATE SET balance = accounts.balance + EXCLUDED.balance
@@ -270,7 +287,7 @@ def handle_message(message):
 
         elif action == 'add_expense':
             # TRAVA DE SEGURANÇA: Exigir o banco
-            if not data.get('bank') or str(data.get('bank')).lower() in ['none', 'null', '']:
+            if not data.get('bank') or str(data.get('bank')) in ['NONE', 'NULL', '']:
                 pending_user_actions[user_id] = data
                 bot.reply_to(message, "🏦 Você esqueceu de me dizer o banco! De qual banco devo descontar esse gasto?")
                 return
@@ -419,8 +436,9 @@ def handle_message(message):
                 total_mes = 0.0
                 
                 for desc, amount in faturas:
-                    if " - Fatura " in desc:
-                        chave = "Fatura " + desc.split(" - Fatura ")[1]
+                    if " - FATURA " in desc.upper():
+                        # Separa garantindo a formatação original do nome
+                        chave = "Fatura " + desc.upper().split(" - FATURA ")[1]
                     else:
                         chave = desc
                     
@@ -445,7 +463,7 @@ def handle_message(message):
 
         elif action == 'pay_bill':
             # TRAVA DE SEGURANÇA: Exigir o banco
-            if not data.get('bank') or str(data.get('bank')).lower() in ['none', 'null', '']:
+            if not data.get('bank') or str(data.get('bank')) in ['NONE', 'NULL', '']:
                 pending_user_actions[user_id] = data
                 bot.reply_to(message, "🏦 Faltou o banco! De qual banco devo descontar o pagamento desta conta/fatura?")
                 return
