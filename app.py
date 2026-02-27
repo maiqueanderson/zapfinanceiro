@@ -88,7 +88,7 @@ def handle_message(message):
         hoje = datetime.utcnow() - timedelta(hours=3)
         bahia_now = "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC' - INTERVAL '3 hours')"
 
-        # --- NOVA FUNÇÃO: COMPRA PARCELADA ---
+        # --- FUNÇÃO: COMPRA PARCELADA (CORRIGIDA PARA O MÊS SEGUINTE) ---
         if action == 'add_installment':
             total = data.get('total_amount', 0.0)
             parcelas = data.get('installments', 1)
@@ -100,7 +100,8 @@ def handle_message(message):
                         7: 'Julho', 8: 'Agosto', 9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'}
             
             for i in range(parcelas):
-                m = hoje.month + i
+                # Adicionado +1 para começar a lançar a partir do mês seguinte
+                m = hoje.month + i + 1
                 ano = hoje.year + (m - 1) // 12
                 mes_num = (m - 1) % 12 + 1
                 nome_mes_ano = f"{meses_pt[mes_num]}/{ano}"
@@ -111,7 +112,7 @@ def handle_message(message):
                             (user_id, valor_parcela, desc_completa))
             
             conn.commit()
-            bot.reply_to(message, f"💳 Compra parcelada de R$ {total:.2f} anotada!\nDividida em {parcelas}x de R$ {valor_parcela:.2f} no cartão {cartao}.")
+            bot.reply_to(message, f"💳 Compra parcelada de R$ {total:.2f} anotada!\nDividida em {parcelas}x de R$ {valor_parcela:.2f} no cartão {cartao}, começando a partir do próximo mês.")
 
         # --- AÇÕES DE GASTOS, RECEITAS E METAS ---
         elif action == 'add_income':
@@ -202,7 +203,6 @@ def handle_message(message):
             if faturas:
                 agrupado = {}
                 for desc, amount in faturas:
-                    # Agrupa as compras do mesmo cartão
                     if " - Fatura " in desc:
                         chave = "Fatura " + desc.split(" - Fatura ")[1]
                     else:
