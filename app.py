@@ -15,6 +15,9 @@ client = Groq(api_key=GROQ_API_KEY)
 bot = telebot.TeleBot(TOKEN, threaded=False)
 app = Flask(__name__)
 
+# --- MEMÓRIA TEMPORÁRIA PARA AÇÕES INCOMPLETAS ---
+pending_user_actions = {}
+
 def get_db():
     return psycopg2.connect(DB_URI)
 
@@ -48,6 +51,7 @@ def process_with_ai(text):
                         "19. Criar Categoria: {'action': 'create_category', 'category': str}\n"
                         "20. Alterar Categoria: {'action': 'update_category', 'old_category': str, 'new_category': str}\n"
                         "21. Deletar Categoria: {'action': 'delete_category', 'category': str}\n"
+                        "22. Informar Apenas o Banco: {'action': 'provide_bank', 'bank': str}\n"
                         "Outros: {'action': 'chat'}"
                     )
                 },
@@ -75,6 +79,7 @@ def webhook():
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
+    global pending_user_actions
     chat_id = message.chat.id
     text = message.text
     conn = None
@@ -90,8 +95,26 @@ def handle_message(message):
             return
 
         user_id = user[0]
+        
+        # --- VERIFICAÇÃO DE MEMÓRIA (AÇÕES PENDENTES) ---
         data = process_with_ai(text)
         action = data.get('action') if data else 'chat'
+
+        if user_id in pending_user_actions:
+            if action == 'provide_bank' or action == 'chat':
+                # O usuário respondeu com o nome do banco
+                banco_informado = data.get('bank') if action == 'provide_bank' else text.strip()
+                
+                # Resgata a ação pausada e adiciona o banco
+                pending_data = pending_user_actions.pop(user_id)
+                pending_data['bank'] = banco_informado
+                
+                # Sobrescreve as variáveis para o fluxo continuar normalmente
+                data = pending_data
+                action = data['action']
+            else:
+                # O usuário ignorou a pergunta do banco e mandou outro comando, então limpamos a memória
+                pending_user_actions.pop(user_id, None)
         
         hoje = datetime.utcnow() - timedelta(hours=3)
         bahia_now = "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC' - INTERVAL '3 hours')"
@@ -124,7 +147,6 @@ def handle_message(message):
         # --- NOVAS FUNÇÕES DE GESTÃO DE CATEGORIAS ---
         if action == 'create_category':
             cat = data.get('category')
-            # Registra uma meta zerada apenas para forçar a existência da categoria no banco
             cur.execute("""
                 INSERT INTO category_goals (user_id, category, goal_amount) VALUES (%s, %s, 0)
                 ON CONFLICT (user_id, category) DO NOTHING
@@ -136,10 +158,8 @@ def handle_message(message):
             old_cat = data.get('old_category')
             new_cat = data.get('new_category')
             
-            # Atualiza transações e metas antigas para o nome novo
             cur.execute("UPDATE transactions SET category = %s WHERE user_id = %s AND category ILIKE %s", (new_cat, user_id, f"%{old_cat}%"))
             trans_count = cur.rowcount
-            
             cur.execute("UPDATE category_goals SET category = %s WHERE user_id = %s AND category ILIKE %s", (new_cat, user_id, f"%{old_cat}%"))
             goal_count = cur.rowcount
             
@@ -152,10 +172,8 @@ def handle_message(message):
         elif action == 'delete_category':
             cat = data.get('category')
             
-            # Move gastos para 'GERAL' e deleta a meta
             cur.execute("UPDATE transactions SET category = 'GERAL' WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{cat}%"))
             trans_count = cur.rowcount
-            
             cur.execute("DELETE FROM category_goals WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{cat}%"))
             
             conn.commit()
@@ -251,14 +269,20 @@ def handle_message(message):
             bot.reply_to(message, f"🎯 Meta de R$ {data['amount']:.2f} para a categoria **{data['category']}** definida com sucesso!", parse_mode="Markdown")
 
         elif action == 'add_expense':
+            # TRAVA DE SEGURANÇA: Exigir o banco
+            if not data.get('bank') or str(data.get('bank')).lower() in ['none', 'null', '']:
+                pending_user_actions[user_id] = data
+                bot.reply_to(message, "🏦 Você esqueceu de me dizer o banco! De qual banco devo descontar esse gasto?")
+                return
+
             cur.execute("INSERT INTO transactions (user_id, amount, category, description) VALUES (%s, %s, %s, %s)",
                         (user_id, data['amount'], data['category'], data['description']))
-            if data.get('bank'):
-                cur.execute("UPDATE accounts SET balance = balance - %s WHERE user_id = %s AND bank_name ILIKE %s",
-                            (data['amount'], user_id, f"%{data['bank']}%"))
+            
+            cur.execute("UPDATE accounts SET balance = balance - %s WHERE user_id = %s AND bank_name ILIKE %s",
+                        (data['amount'], user_id, f"%{data['bank']}%"))
             conn.commit()
             
-            reply_msg = f"✅ Gasto de R$ {data['amount']:.2f} salvo em {data['category']}!"
+            reply_msg = f"✅ Gasto de R$ {data['amount']:.2f} salvo em {data['category']} descontado do {data['bank']}!"
 
             cur.execute("SELECT goal_amount FROM category_goals WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{data['category']}%"))
             goal_res = cur.fetchone()
@@ -310,7 +334,6 @@ def handle_message(message):
                 bot.reply_to(message, f"Você ainda não definiu nenhuma meta para a categoria **{cat}**.")
 
         elif action == 'list_goals':
-            # Agora busca apenas metas que têm valores reais (maior que zero)
             cur.execute("SELECT category, goal_amount FROM category_goals WHERE user_id = %s AND goal_amount > 0 ORDER BY category", (user_id,))
             metas = cur.fetchall()
             
@@ -364,7 +387,6 @@ def handle_message(message):
             bot.reply_to(message, f"🔍 Gastos com **{cat}** ({label}):\n💰 R$ {total:.2f}", parse_mode="Markdown")
 
         elif action == 'list_categories':
-            # Busca todas as categorias (tanto dos gastos quanto das criadas sem gastos ainda)
             cur.execute("""
                 SELECT DISTINCT category FROM (
                     SELECT category FROM transactions WHERE user_id = %s
@@ -422,6 +444,12 @@ def handle_message(message):
             bot.reply_to(message, f"💰 O valor total de contas a pagar pendentes para {mes} é:\nR$ {total:.2f}".replace('.', ','))
 
         elif action == 'pay_bill':
+            # TRAVA DE SEGURANÇA: Exigir o banco
+            if not data.get('bank') or str(data.get('bank')).lower() in ['none', 'null', '']:
+                pending_user_actions[user_id] = data
+                bot.reply_to(message, "🏦 Faltou o banco! De qual banco devo descontar o pagamento desta conta/fatura?")
+                return
+
             desc, mes, bank = data.get('description', ''), data.get('month', ''), data.get('bank')
             cur.execute("SELECT SUM(amount) FROM scheduled_expenses WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s AND is_active = true",
                         (user_id, f"%{desc}%", f"%{mes}%"))
@@ -430,9 +458,9 @@ def handle_message(message):
                 total_pago = res[0]
                 cur.execute("UPDATE scheduled_expenses SET is_active = false WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s AND is_active = true",
                             (user_id, f"%{desc}%", f"%{mes}%"))
-                if bank:
-                    cur.execute("UPDATE accounts SET balance = balance - %s WHERE user_id = %s AND bank_name ILIKE %s",
-                                (total_pago, user_id, f"%{bank}%"))
+                
+                cur.execute("UPDATE accounts SET balance = balance - %s WHERE user_id = %s AND bank_name ILIKE %s",
+                            (total_pago, user_id, f"%{bank}%"))
                 conn.commit()
                 bot.reply_to(message, f"✔️ Fatura/Conta paga com {bank}! O valor total de R$ {total_pago:.2f} foi descontado do seu saldo.")
             else:
