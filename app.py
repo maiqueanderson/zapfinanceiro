@@ -85,7 +85,6 @@ def handle_message(message):
         data = process_with_ai(text)
         action = data.get('action') if data else 'chat'
         
-        # Horário local para garantir precisão nas datas
         hoje = datetime.utcnow() - timedelta(hours=3)
         bahia_now = "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC' - INTERVAL '3 hours')"
 
@@ -100,14 +99,12 @@ def handle_message(message):
             meses_pt = {1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril', 5: 'Maio', 6: 'Junho', 
                         7: 'Julho', 8: 'Agosto', 9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'}
             
-            # Loop matemático para calcular a travessia de meses e anos
             for i in range(parcelas):
                 m = hoje.month + i
                 ano = hoje.year + (m - 1) // 12
                 mes_num = (m - 1) % 12 + 1
                 nome_mes_ano = f"{meses_pt[mes_num]}/{ano}"
                 
-                # Exemplo: "Televisão (Parcela 1/10) - Fatura Mercado Pago - Fevereiro/2026"
                 desc_completa = f"{desc} (Parcela {i+1}/{parcelas}) - Fatura {cartao} - {nome_mes_ano}"
                 
                 cur.execute("INSERT INTO scheduled_expenses (user_id, amount, description, is_active) VALUES (%s, %s, %s, true)",
@@ -203,7 +200,17 @@ def handle_message(message):
                         (user_id, f"%{mes}%"))
             faturas = cur.fetchall()
             if faturas:
-                lista = "\n".join([f"• {f[0]}: R$ {f[1]:.2f}" for f in faturas])
+                agrupado = {}
+                for desc, amount in faturas:
+                    # Agrupa as compras do mesmo cartão
+                    if " - Fatura " in desc:
+                        chave = "Fatura " + desc.split(" - Fatura ")[1]
+                    else:
+                        chave = desc
+                    
+                    agrupado[chave] = agrupado.get(chave, 0) + float(amount)
+
+                lista = "\n".join([f"• {k}: R$ {v:.2f}" for k, v in agrupado.items()])
                 bot.reply_to(message, f"⏳ **Contas a pagar pendentes ({mes}):**\n{lista}", parse_mode="Markdown")
             else:
                 bot.reply_to(message, f"✅ Nenhuma conta a pagar pendente para {mes}.")
@@ -217,7 +224,6 @@ def handle_message(message):
 
         elif action == 'pay_bill':
             desc, mes, bank = data.get('description', ''), data.get('month', ''), data.get('bank')
-            # Alteração principal: Agora somamos todas as parcelas e contas que batem com a pesquisa para abater do banco
             cur.execute("SELECT SUM(amount) FROM scheduled_expenses WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s AND is_active = true",
                         (user_id, f"%{desc}%", f"%{mes}%"))
             res = cur.fetchone()
