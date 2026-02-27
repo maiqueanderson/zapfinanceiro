@@ -38,6 +38,7 @@ def process_with_ai(text):
                         "9. Relatório Categoria: {'action': 'report_category', 'category': str, 'period': 'today'|'week'|'month'}\n"
                         "10. Listar Categorias: {'action': 'list_categories'}\n"
                         "11. Definir Meta: {'action': 'set_goal', 'amount': float, 'category': str}\n"
+                        "12. Alterar Valor de Fatura/Conta: {'action': 'update_bill', 'description': str, 'month': str, 'new_amount': float}\n"
                         "Outros: {'action': 'chat'}"
                     )
                 },
@@ -199,6 +200,24 @@ def handle_message(message):
                 bot.reply_to(message, f"✔️ Conta paga com {bank}! O valor de R$ {res[0]:.2f} foi descontado do seu saldo.")
             else:
                 bot.reply_to(message, "Conta a pagar não encontrada.")
+
+        # --- NOVA FUNÇÃO: ALTERAR VALOR DA FATURA/CONTA ---
+        elif action == 'update_bill':
+            desc = data.get('description', '')
+            mes = data.get('month', '')
+            novo_valor = data.get('new_amount', 0.0)
+            
+            # Busca a conta específica que ainda está ativa
+            cur.execute("SELECT id FROM scheduled_expenses WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s AND is_active = true",
+                        (user_id, f"%{desc}%", f"%{mes}%"))
+            res = cur.fetchone()
+            
+            if res:
+                cur.execute("UPDATE scheduled_expenses SET amount = %s WHERE id = %s", (novo_valor, res[0]))
+                conn.commit()
+                bot.reply_to(message, f"✏️ O valor da fatura/conta '{desc}' de {mes} foi alterado para R$ {novo_valor:.2f}.")
+            else:
+                bot.reply_to(message, f"❌ Não encontrei nenhuma fatura ou conta pendente de '{desc}' no mês de {mes}.")
 
         # --- OUTROS RELATÓRIOS E SALDOS ---
         elif action == 'get_balance':
