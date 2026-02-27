@@ -30,16 +30,16 @@ def process_with_ai(text):
                         "1. Gasto: {'action': 'add_expense', 'amount': float, 'category': str, 'description': str, 'bank': str}\n"
                         "2. Receita: {'action': 'add_income', 'amount': float, 'bank': str, 'description': str}\n"
                         "3. Saldo: {'action': 'get_balance', 'bank': str}\n"
-                        "4. Fatura Simples ou Conta: {'action': 'add_bill', 'amount': float, 'description': str, 'month': str}\n"
+                        "4. Fatura Simples ou Conta: {'action': 'add_bill', 'amount': float, 'description': str, 'month': 'MÊS EM PORTUGUÊS'}\n"
                         "5. Compra Parcelada: {'action': 'add_installment', 'total_amount': float, 'installments': int, 'description': str, 'card': str}\n"
-                        "6. Listar Contas/Faturas: {'action': 'list_bills', 'month': str}\n"
-                        "7. Total Contas/Faturas: {'action': 'total_bills', 'month': str}\n"
-                        "8. Pagar Conta/Fatura: {'action': 'pay_bill', 'description': str, 'month': str, 'bank': str}\n"
+                        "6. Listar Contas/Faturas: {'action': 'list_bills', 'month': 'MÊS EM PORTUGUÊS'}\n"
+                        "7. Total Contas/Faturas: {'action': 'total_bills', 'month': 'MÊS EM PORTUGUÊS'}\n"
+                        "8. Pagar Conta/Fatura: {'action': 'pay_bill', 'description': str, 'month': 'MÊS EM PORTUGUÊS', 'bank': str}\n"
                         "9. Relatórios Gerais: {'action': 'get_report', 'period': 'today'|'yesterday'|'week'|'month'}\n"
                         "10. Relatório Categoria: {'action': 'report_category', 'category': str, 'period': 'today'|'week'|'month'}\n"
                         "11. Listar Categorias: {'action': 'list_categories'}\n"
                         "12. Definir Meta: {'action': 'set_goal', 'amount': float, 'category': str}\n"
-                        "13. Alterar Valor de Fatura/Conta: {'action': 'update_bill', 'description': str, 'month': str, 'new_amount': float}\n"
+                        "13. Alterar Valor de Fatura/Conta: {'action': 'update_bill', 'description': str, 'month': 'MÊS EM PORTUGUÊS', 'new_amount': float}\n"
                         "Outros: {'action': 'chat'}"
                     )
                 },
@@ -88,7 +88,26 @@ def handle_message(message):
         hoje = datetime.utcnow() - timedelta(hours=3)
         bahia_now = "(CURRENT_TIMESTAMP AT TIME ZONE 'UTC' - INTERVAL '3 hours')"
 
-        # --- FUNÇÃO: COMPRA PARCELADA (CORRIGIDA PARA O MÊS SEGUINTE) ---
+        meses_pt = {1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril', 5: 'Maio', 6: 'Junho', 
+                    7: 'Julho', 8: 'Agosto', 9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'}
+
+        # --- TRADUTOR AUTOMÁTICO DE MESES ---
+        if data and data.get('month'):
+            mes_original = str(data['month']).lower().strip()
+            traducao_meses = {
+                'january': 'Janeiro', 'february': 'Fevereiro', 'march': 'Março', 'april': 'Abril',
+                'may': 'Maio', 'june': 'Junho', 'july': 'Julho', 'august': 'Agosto',
+                'september': 'Setembro', 'october': 'Outubro', 'november': 'Novembro', 'december': 'Dezembro',
+                'jan': 'Janeiro', 'feb': 'Fevereiro', 'mar': 'Março', 'apr': 'Abril',
+                'jun': 'Junho', 'jul': 'Julho', 'aug': 'Agosto', 'sep': 'Setembro',
+                'oct': 'Outubro', 'nov': 'Novembro', 'dec': 'Dezembro'
+            }
+            if mes_original in traducao_meses:
+                data['month'] = traducao_meses[mes_original]
+            else:
+                data['month'] = mes_original.capitalize()
+
+        # --- FUNÇÃO: COMPRA PARCELADA ---
         if action == 'add_installment':
             total = data.get('total_amount', 0.0)
             parcelas = data.get('installments', 1)
@@ -96,11 +115,8 @@ def handle_message(message):
             cartao = data.get('card', 'Cartão')
             
             valor_parcela = total / parcelas
-            meses_pt = {1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril', 5: 'Maio', 6: 'Junho', 
-                        7: 'Julho', 8: 'Agosto', 9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'}
             
             for i in range(parcelas):
-                # Adicionado +1 para começar a lançar a partir do mês seguinte
                 m = hoje.month + i + 1
                 ano = hoje.year + (m - 1) // 12
                 mes_num = (m - 1) % 12 + 1
@@ -196,7 +212,7 @@ def handle_message(message):
             bot.reply_to(message, f"🧾 Conta/Fatura de {data['month']} anotada com sucesso!")
 
         elif action == 'list_bills':
-            mes = data.get('month') or hoje.strftime('%B')
+            mes = data.get('month') or meses_pt[hoje.month]
             cur.execute("SELECT description, amount FROM scheduled_expenses WHERE user_id = %s AND is_active = true AND description ILIKE %s",
                         (user_id, f"%{mes}%"))
             faturas = cur.fetchall()
@@ -216,7 +232,7 @@ def handle_message(message):
                 bot.reply_to(message, f"✅ Nenhuma conta a pagar pendente para {mes}.")
 
         elif action == 'total_bills':
-            mes = data.get('month') or hoje.strftime('%B')
+            mes = data.get('month') or meses_pt[hoje.month]
             cur.execute("SELECT SUM(amount) FROM scheduled_expenses WHERE user_id = %s AND is_active = true AND description ILIKE %s",
                         (user_id, f"%{mes}%"))
             total = cur.fetchone()[0] or 0
