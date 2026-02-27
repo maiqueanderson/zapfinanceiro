@@ -41,6 +41,8 @@ def process_with_ai(text):
                         "12. Definir Meta: {'action': 'set_goal', 'amount': float, 'category': str}\n"
                         "13. Alterar Valor de Fatura/Conta: {'action': 'update_bill', 'description': str, 'month': 'MÊS EM PORTUGUÊS', 'new_amount': float}\n"
                         "14. Consultar Meta de Categoria: {'action': 'check_goal', 'category': str}\n"
+                        "15. Apagar Último Gasto: {'action': 'delete_last'}\n"
+                        "16. Apagar Conta/Fatura: {'action': 'delete_bill', 'description': str, 'month': 'MÊS EM PORTUGUÊS'}\n"
                         "Outros: {'action': 'chat'}"
                     )
                 },
@@ -108,8 +110,42 @@ def handle_message(message):
             else:
                 data['month'] = mes_original.capitalize()
 
+        # --- FUNÇÃO: APAGAR ÚLTIMO GASTO ---
+        if action == 'delete_last':
+            # Busca o gasto mais recente do usuário
+            cur.execute("SELECT id, amount, description FROM transactions WHERE user_id = %s ORDER BY id DESC LIMIT 1", (user_id,))
+            last_tx = cur.fetchone()
+            
+            if last_tx:
+                tx_id = last_tx[0]
+                valor = last_tx[1]
+                desc = last_tx[2]
+                
+                cur.execute("DELETE FROM transactions WHERE id = %s", (tx_id,))
+                conn.commit()
+                bot.reply_to(message, f"🗑️ **Último gasto apagado com sucesso!**\n\n💸 Descrição: {desc}\n💰 Valor: R$ {valor:.2f}\n\n⚠️ *Dica: Se este gasto havia descontado saldo de algum banco, lembre-se de adicionar o valor de volta manualmente (ex: 'Adicione {valor:.2f} no Nubank').*", parse_mode="Markdown")
+            else:
+                bot.reply_to(message, "Não encontrei nenhum gasto recente para apagar.")
+
+        # --- FUNÇÃO: APAGAR CONTA/FATURA ---
+        elif action == 'delete_bill':
+            desc = data.get('description', '')
+            mes = data.get('month', '')
+            
+            # Busca a conta para apagar
+            cur.execute("SELECT id, amount FROM scheduled_expenses WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s",
+                        (user_id, f"%{desc}%", f"%{mes}%"))
+            res = cur.fetchone()
+            
+            if res:
+                cur.execute("DELETE FROM scheduled_expenses WHERE id = %s", (res[0],))
+                conn.commit()
+                bot.reply_to(message, f"🗑️ A conta/fatura **'{desc}'** do mês de **{mes}** (R$ {res[1]:.2f}) foi excluída com sucesso!", parse_mode="Markdown")
+            else:
+                bot.reply_to(message, f"❌ Não encontrei nenhuma conta/fatura com o nome '{desc}' no mês de {mes} para apagar.")
+
         # --- FUNÇÃO: COMPRA PARCELADA ---
-        if action == 'add_installment':
+        elif action == 'add_installment':
             total = data.get('total_amount', 0.0)
             parcelas = data.get('installments', 1)
             desc = data.get('description', 'Compra')
@@ -176,25 +212,21 @@ def handle_message(message):
 
             bot.reply_to(message, reply_msg)
 
-        # --- NOVA FUNÇÃO: CONSULTAR META DE CATEGORIA ---
         elif action == 'check_goal':
             cat = data.get('category')
             
-            # Busca a meta da categoria para o usuário
             cur.execute("SELECT goal_amount FROM category_goals WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{cat}%"))
             goal_res = cur.fetchone()
             
             if goal_res:
                 meta = float(goal_res[0])
                 
-                # Busca a soma dos gastos desta categoria no mês atual
                 cur.execute(f"SELECT SUM(amount) FROM transactions WHERE user_id = %s AND category ILIKE %s AND date >= date_trunc('month', {bahia_now})", 
                             (user_id, f"%{cat}%"))
                 total_gasto = float(cur.fetchone()[0] or 0)
                 
                 restante = meta - total_gasto
                 
-                # Formatação para o padrão brasileiro
                 meta_fmt = f"{meta:.2f}".replace('.', ',')
                 gasto_fmt = f"{total_gasto:.2f}".replace('.', ',')
                 restante_fmt = f"{restante:.2f}".replace('.', ',')
@@ -206,7 +238,7 @@ def handle_message(message):
                 if restante >= 0:
                     mensagem += f"✅ **Ainda pode gastar:** R$ {restante_fmt}"
                 else:
-                    mensagem += f"⚠️ **Passou da meta em:** R$ {restante_fmt}"
+                    mensagem += f"⚠️ **Passou da meta em:** R$ {abs(restante):.2f}".replace('.', ',')
                     
                 bot.reply_to(message, mensagem, parse_mode="Markdown")
             else:
