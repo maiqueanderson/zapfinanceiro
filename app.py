@@ -45,6 +45,9 @@ def process_with_ai(text):
                         "16. Apagar Último Gasto: {'action': 'delete_last'}\n"
                         "17. Apagar Conta/Fatura: {'action': 'delete_bill', 'description': str, 'month': 'MÊS EM PORTUGUÊS'}\n"
                         "18. Apagar Banco: {'action': 'delete_bank', 'bank': str}\n"
+                        "19. Criar Categoria: {'action': 'create_category', 'category': str}\n"
+                        "20. Alterar Categoria: {'action': 'update_category', 'old_category': str, 'new_category': str}\n"
+                        "21. Deletar Categoria: {'action': 'delete_category', 'category': str}\n"
                         "Outros: {'action': 'chat'}"
                     )
                 },
@@ -96,6 +99,12 @@ def handle_message(message):
         meses_pt = {1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril', 5: 'Maio', 6: 'Junho', 
                     7: 'Julho', 8: 'Agosto', 9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'}
 
+        # --- PADRONIZADOR DE CATEGORIAS PARA MAIÚSCULO ---
+        if data:
+            for key in ['category', 'old_category', 'new_category']:
+                if data.get(key):
+                    data[key] = str(data[key]).upper().strip()
+
         # --- TRADUTOR AUTOMÁTICO DE MESES ---
         if data and data.get('month'):
             mes_original = str(data['month']).lower().strip()
@@ -112,8 +121,52 @@ def handle_message(message):
             else:
                 data['month'] = mes_original.capitalize()
 
+        # --- NOVAS FUNÇÕES DE GESTÃO DE CATEGORIAS ---
+        if action == 'create_category':
+            cat = data.get('category')
+            # Registra uma meta zerada apenas para forçar a existência da categoria no banco
+            cur.execute("""
+                INSERT INTO category_goals (user_id, category, goal_amount) VALUES (%s, %s, 0)
+                ON CONFLICT (user_id, category) DO NOTHING
+            """, (user_id, cat))
+            conn.commit()
+            bot.reply_to(message, f"✅ Categoria **{cat}** criada com sucesso e pronta para uso!", parse_mode="Markdown")
+
+        elif action == 'update_category':
+            old_cat = data.get('old_category')
+            new_cat = data.get('new_category')
+            
+            # Atualiza transações e metas antigas para o nome novo
+            cur.execute("UPDATE transactions SET category = %s WHERE user_id = %s AND category ILIKE %s", (new_cat, user_id, f"%{old_cat}%"))
+            trans_count = cur.rowcount
+            
+            cur.execute("UPDATE category_goals SET category = %s WHERE user_id = %s AND category ILIKE %s", (new_cat, user_id, f"%{old_cat}%"))
+            goal_count = cur.rowcount
+            
+            conn.commit()
+            if trans_count > 0 or goal_count > 0:
+                bot.reply_to(message, f"✏️ Categoria **{old_cat}** alterada para **{new_cat}** com sucesso!", parse_mode="Markdown")
+            else:
+                bot.reply_to(message, f"❌ Não encontrei a categoria **{old_cat}** para alterar.", parse_mode="Markdown")
+
+        elif action == 'delete_category':
+            cat = data.get('category')
+            
+            # Move gastos para 'GERAL' e deleta a meta
+            cur.execute("UPDATE transactions SET category = 'GERAL' WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{cat}%"))
+            trans_count = cur.rowcount
+            
+            cur.execute("DELETE FROM category_goals WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{cat}%"))
+            
+            conn.commit()
+            if trans_count > 0 or cur.rowcount > 0:
+                bot.reply_to(message, f"🗑️ Categoria **{cat}** deletada!\n⚠️ *Para não bagunçar seus relatórios, os gastos antigos que estavam nela foram movidos para a categoria 'GERAL'.*", parse_mode="Markdown")
+            else:
+                bot.reply_to(message, f"❌ Não encontrei a categoria **{cat}** para deletar.", parse_mode="Markdown")
+
+
         # --- FUNÇÃO: APAGAR ÚLTIMO GASTO ---
-        if action == 'delete_last':
+        elif action == 'delete_last':
             cur.execute("SELECT id, amount, description FROM transactions WHERE user_id = %s ORDER BY id DESC LIMIT 1", (user_id,))
             last_tx = cur.fetchone()
             
@@ -243,7 +296,7 @@ def handle_message(message):
                 gasto_fmt = f"{total_gasto:.2f}".replace('.', ',')
                 restante_fmt = f"{restante:.2f}".replace('.', ',')
                 
-                mensagem = f"🎯 **Resumo da Meta: {cat.capitalize()}**\n\n"
+                mensagem = f"🎯 **Resumo da Meta: {cat}**\n\n"
                 mensagem += f"🔸 **Sua Meta:** R$ {meta_fmt}\n"
                 mensagem += f"💸 **Total Gasto:** R$ {gasto_fmt}\n"
                 
@@ -256,9 +309,9 @@ def handle_message(message):
             else:
                 bot.reply_to(message, f"Você ainda não definiu nenhuma meta para a categoria **{cat}**.")
 
-        # --- NOVA FUNÇÃO: LISTAR TODAS AS METAS ---
         elif action == 'list_goals':
-            cur.execute("SELECT category, goal_amount FROM category_goals WHERE user_id = %s ORDER BY category", (user_id,))
+            # Agora busca apenas metas que têm valores reais (maior que zero)
+            cur.execute("SELECT category, goal_amount FROM category_goals WHERE user_id = %s AND goal_amount > 0 ORDER BY category", (user_id,))
             metas = cur.fetchall()
             
             if metas:
@@ -267,7 +320,6 @@ def handle_message(message):
                 
                 for cat, meta in metas:
                     meta = float(meta)
-                    # Busca os gastos desta categoria no mês atual
                     cur.execute(f"SELECT SUM(amount) FROM transactions WHERE user_id = %s AND category ILIKE %s AND date >= date_trunc('month', {bahia_now})", 
                                 (user_id, f"%{cat}%"))
                     gasto = float(cur.fetchone()[0] or 0)
@@ -276,11 +328,11 @@ def handle_message(message):
                     meta_str = f"{meta:.2f}".replace('.', ',')
                     restante_str = f"{restante:.2f}".replace('.', ',')
                     
-                    mensagem += f"🔸 **{cat.capitalize()}** (Meta: R$ {meta_str})\n"
+                    mensagem += f"🔸 **{cat}** (Meta: R$ {meta_str})\n"
                     
                     if restante >= 0:
                         mensagem += f"✅ Resta: R$ {restante_str}\n\n"
-                        total_livre += restante # Soma apenas as metas positivas
+                        total_livre += restante 
                     else:
                         mensagem += f"⚠️ Ultrapassou: -R$ {abs(restante):.2f}".replace('.', ',') + "\n\n"
                 
@@ -312,8 +364,16 @@ def handle_message(message):
             bot.reply_to(message, f"🔍 Gastos com **{cat}** ({label}):\n💰 R$ {total:.2f}", parse_mode="Markdown")
 
         elif action == 'list_categories':
-            cur.execute("SELECT DISTINCT category FROM transactions WHERE user_id = %s ORDER BY category", (user_id,))
+            # Busca todas as categorias (tanto dos gastos quanto das criadas sem gastos ainda)
+            cur.execute("""
+                SELECT DISTINCT category FROM (
+                    SELECT category FROM transactions WHERE user_id = %s
+                    UNION
+                    SELECT category FROM category_goals WHERE user_id = %s
+                ) AS cats ORDER BY category
+            """, (user_id, user_id))
             cats = cur.fetchall()
+            
             if cats:
                 msg = "📂 **Suas categorias cadastradas:**\n" + "\n".join([f"• {c[0]}" for c in cats])
                 bot.reply_to(message, msg, parse_mode="Markdown")
