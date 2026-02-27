@@ -40,6 +40,7 @@ def process_with_ai(text):
                         "11. Listar Categorias: {'action': 'list_categories'}\n"
                         "12. Definir Meta: {'action': 'set_goal', 'amount': float, 'category': str}\n"
                         "13. Alterar Valor de Fatura/Conta: {'action': 'update_bill', 'description': str, 'month': 'MÊS EM PORTUGUÊS', 'new_amount': float}\n"
+                        "14. Consultar Meta de Categoria: {'action': 'check_goal', 'category': str}\n"
                         "Outros: {'action': 'chat'}"
                     )
                 },
@@ -175,6 +176,42 @@ def handle_message(message):
 
             bot.reply_to(message, reply_msg)
 
+        # --- NOVA FUNÇÃO: CONSULTAR META DE CATEGORIA ---
+        elif action == 'check_goal':
+            cat = data.get('category')
+            
+            # Busca a meta da categoria para o usuário
+            cur.execute("SELECT goal_amount FROM category_goals WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{cat}%"))
+            goal_res = cur.fetchone()
+            
+            if goal_res:
+                meta = float(goal_res[0])
+                
+                # Busca a soma dos gastos desta categoria no mês atual
+                cur.execute(f"SELECT SUM(amount) FROM transactions WHERE user_id = %s AND category ILIKE %s AND date >= date_trunc('month', {bahia_now})", 
+                            (user_id, f"%{cat}%"))
+                total_gasto = float(cur.fetchone()[0] or 0)
+                
+                restante = meta - total_gasto
+                
+                # Formatação para o padrão brasileiro
+                meta_fmt = f"{meta:.2f}".replace('.', ',')
+                gasto_fmt = f"{total_gasto:.2f}".replace('.', ',')
+                restante_fmt = f"{restante:.2f}".replace('.', ',')
+                
+                mensagem = f"🎯 **Resumo da Meta: {cat.capitalize()}**\n\n"
+                mensagem += f"🔸 **Sua Meta:** R$ {meta_fmt}\n"
+                mensagem += f"💸 **Total Gasto:** R$ {gasto_fmt}\n"
+                
+                if restante >= 0:
+                    mensagem += f"✅ **Ainda pode gastar:** R$ {restante_fmt}"
+                else:
+                    mensagem += f"⚠️ **Passou da meta em:** R$ {restante_fmt}"
+                    
+                bot.reply_to(message, mensagem, parse_mode="Markdown")
+            else:
+                bot.reply_to(message, f"Você ainda não definiu nenhuma meta para a categoria **{cat}**.")
+
         # --- NOVAS FUNÇÕES: CATEGORIAS ---
         elif action == 'report_category':
             cat = data.get('category')
@@ -278,7 +315,7 @@ def handle_message(message):
             else:
                 bot.reply_to(message, f"❌ Não encontrei nenhuma fatura ou conta pendente de '{desc}' no mês de {mes}.")
 
-        # --- CONSULTA DE SALDO CORRIGIDA COM O TOTAL ---
+        # --- OUTROS RELATÓRIOS E SALDOS ---
         elif action == 'get_balance':
             cur.execute("SELECT bank_name, balance FROM accounts WHERE user_id = %s", (user_id,))
             rows = cur.fetchall()
