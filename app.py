@@ -40,10 +40,11 @@ def process_with_ai(text):
                         "11. Listar Categorias: {'action': 'list_categories'}\n"
                         "12. Definir Meta: {'action': 'set_goal', 'amount': float, 'category': str}\n"
                         "13. Alterar Valor de Fatura/Conta: {'action': 'update_bill', 'description': str, 'month': 'MÊS EM PORTUGUÊS', 'new_amount': float}\n"
-                        "14. Consultar Meta de Categoria: {'action': 'check_goal', 'category': str}\n"
-                        "15. Apagar Último Gasto: {'action': 'delete_last'}\n"
-                        "16. Apagar Conta/Fatura: {'action': 'delete_bill', 'description': str, 'month': 'MÊS EM PORTUGUÊS'}\n"
-                        "17. Apagar Banco: {'action': 'delete_bank', 'bank': str}\n"
+                        "14. Consultar Meta Específica: {'action': 'check_goal', 'category': str}\n"
+                        "15. Listar Todas as Metas: {'action': 'list_goals'}\n"
+                        "16. Apagar Último Gasto: {'action': 'delete_last'}\n"
+                        "17. Apagar Conta/Fatura: {'action': 'delete_bill', 'description': str, 'month': 'MÊS EM PORTUGUÊS'}\n"
+                        "18. Apagar Banco: {'action': 'delete_bank', 'bank': str}\n"
                         "Outros: {'action': 'chat'}"
                     )
                 },
@@ -254,6 +255,41 @@ def handle_message(message):
                 bot.reply_to(message, mensagem, parse_mode="Markdown")
             else:
                 bot.reply_to(message, f"Você ainda não definiu nenhuma meta para a categoria **{cat}**.")
+
+        # --- NOVA FUNÇÃO: LISTAR TODAS AS METAS ---
+        elif action == 'list_goals':
+            cur.execute("SELECT category, goal_amount FROM category_goals WHERE user_id = %s ORDER BY category", (user_id,))
+            metas = cur.fetchall()
+            
+            if metas:
+                mensagem = "🎯 **Resumo de Todas as Metas:**\n\n"
+                total_livre = 0.0
+                
+                for cat, meta in metas:
+                    meta = float(meta)
+                    # Busca os gastos desta categoria no mês atual
+                    cur.execute(f"SELECT SUM(amount) FROM transactions WHERE user_id = %s AND category ILIKE %s AND date >= date_trunc('month', {bahia_now})", 
+                                (user_id, f"%{cat}%"))
+                    gasto = float(cur.fetchone()[0] or 0)
+                    restante = meta - gasto
+                    
+                    meta_str = f"{meta:.2f}".replace('.', ',')
+                    restante_str = f"{restante:.2f}".replace('.', ',')
+                    
+                    mensagem += f"🔸 **{cat.capitalize()}** (Meta: R$ {meta_str})\n"
+                    
+                    if restante >= 0:
+                        mensagem += f"✅ Resta: R$ {restante_str}\n\n"
+                        total_livre += restante # Soma apenas as metas positivas
+                    else:
+                        mensagem += f"⚠️ Ultrapassou: -R$ {abs(restante):.2f}".replace('.', ',') + "\n\n"
+                
+                total_livre_str = f"{total_livre:.2f}".replace('.', ',')
+                mensagem += f"✅ **Valor total a ser gasto em todas as metas:** R$ {total_livre_str}"
+                
+                bot.reply_to(message, mensagem, parse_mode="Markdown")
+            else:
+                bot.reply_to(message, "Você ainda não tem metas cadastradas.")
 
         # --- NOVAS FUNÇÕES: CATEGORIAS ---
         elif action == 'report_category':
