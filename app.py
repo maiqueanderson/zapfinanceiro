@@ -43,6 +43,7 @@ def process_with_ai(text):
                         "14. Consultar Meta de Categoria: {'action': 'check_goal', 'category': str}\n"
                         "15. Apagar Último Gasto: {'action': 'delete_last'}\n"
                         "16. Apagar Conta/Fatura: {'action': 'delete_bill', 'description': str, 'month': 'MÊS EM PORTUGUÊS'}\n"
+                        "17. Apagar Banco: {'action': 'delete_bank', 'bank': str}\n"
                         "Outros: {'action': 'chat'}"
                     )
                 },
@@ -112,7 +113,6 @@ def handle_message(message):
 
         # --- FUNÇÃO: APAGAR ÚLTIMO GASTO ---
         if action == 'delete_last':
-            # Busca o gasto mais recente do usuário
             cur.execute("SELECT id, amount, description FROM transactions WHERE user_id = %s ORDER BY id DESC LIMIT 1", (user_id,))
             last_tx = cur.fetchone()
             
@@ -132,7 +132,6 @@ def handle_message(message):
             desc = data.get('description', '')
             mes = data.get('month', '')
             
-            # Busca a conta para apagar
             cur.execute("SELECT id, amount FROM scheduled_expenses WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s",
                         (user_id, f"%{desc}%", f"%{mes}%"))
             res = cur.fetchone()
@@ -143,6 +142,18 @@ def handle_message(message):
                 bot.reply_to(message, f"🗑️ A conta/fatura **'{desc}'** do mês de **{mes}** (R$ {res[1]:.2f}) foi excluída com sucesso!", parse_mode="Markdown")
             else:
                 bot.reply_to(message, f"❌ Não encontrei nenhuma conta/fatura com o nome '{desc}' no mês de {mes} para apagar.")
+
+        # --- FUNÇÃO: APAGAR BANCO ---
+        elif action == 'delete_bank':
+            banco = data.get('bank', '')
+            
+            cur.execute("DELETE FROM accounts WHERE user_id = %s AND bank_name ILIKE %s", (user_id, f"%{banco}%"))
+            
+            if cur.rowcount > 0:
+                conn.commit()
+                bot.reply_to(message, f"🏦 A conta do banco **{banco.capitalize()}** foi apagada com sucesso!", parse_mode="Markdown")
+            else:
+                bot.reply_to(message, f"❌ Não encontrei nenhum banco com o nome **{banco.capitalize()}** para apagar.")
 
         # --- FUNÇÃO: COMPRA PARCELADA ---
         elif action == 'add_installment':
