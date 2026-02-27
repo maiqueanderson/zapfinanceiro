@@ -1,4 +1,5 @@
 import os
+import sys
 import telebot
 from flask import Flask, request
 import psycopg2
@@ -20,7 +21,8 @@ app = Flask(__name__)
 pending_user_actions = {}
 
 def get_db():
-    return psycopg2.connect(DB_URI)
+    # Adicionado timeout de 10s para não travar o banco
+    return psycopg2.connect(DB_URI, connect_timeout=10)
 
 def process_with_ai(text):
     try:
@@ -60,25 +62,34 @@ def process_with_ai(text):
                 },
                 {"role": "user", "content": text}
             ],
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            timeout=15 # Impede que a IA trave o servidor
         )
         return json.loads(completion.choices[0].message.content)
     except Exception as e:
-        print(f"Erro IA: {e}")
+        print(f"Erro na IA: {e}", flush=True)
         return None
 
 @app.route('/')
 def index():
     return "ZapFinanceiro Online!", 200
 
+# --- NOVA ROTA PARA RECONECTAR O BOT ---
+@app.route('/set_webhook')
+def set_webhook_route():
+    base_url = request.url_root.replace("http://", "https://")
+    webhook_url = f"{base_url}{TOKEN}"
+    bot.remove_webhook()
+    bot.set_webhook(url=webhook_url)
+    return f"✅ Conexão com o Telegram resetada com sucesso para: {webhook_url}", 200
+
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return '', 200
-    return '', 403
+    # Removi a checagem rígida de content-type que pode barrar mensagens
+    json_string = request.get_data().decode('utf-8')
+    update = telebot.types.Update.de_json(json_string)
+    bot.process_new_updates([update])
+    return '', 200
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
@@ -86,6 +97,8 @@ def handle_message(message):
     chat_id = message.chat.id
     text = message.text or ""
     conn = None
+
+    print(f"Nova mensagem recebida: {text}", flush=True)
 
     try:
         conn = get_db()
@@ -99,11 +112,10 @@ def handle_message(message):
 
         user_id = user[0]
         
-        # Processa comando com a IA
         data = process_with_ai(text)
         action = data.get('action') if data else 'chat'
 
-        # --- BLINDAGEM CONTRA VALORES VAZIOS (NULL) DA IA ---
+        # --- BLINDAGEM CONTRA VALORES VAZIOS ---
         if data:
             for key, value in data.items():
                 if value is None:
@@ -111,19 +123,15 @@ def handle_message(message):
                 elif isinstance(value, str):
                     data[key] = value.strip()
             
-            # Converter para maiúsculo campos específicos de forma segura
             for key in ['category', 'old_category', 'new_category', 'bank', 'old_bank', 'new_bank']:
                 if data.get(key):
                     data[key] = data[key].upper()
 
-        # --- VERIFICAÇÃO DE MEMÓRIA (AÇÕES PENDENTES) ---
         if user_id in pending_user_actions:
             if action == 'provide_bank' or action == 'chat':
                 banco_informado = data.get('bank') if (action == 'provide_bank' and data.get('bank')) else text.strip()
-                
                 pending_data = pending_user_actions.pop(user_id)
                 pending_data['bank'] = banco_informado.upper()
-                
                 data = pending_data
                 action = data.get('action')
             else:
@@ -135,7 +143,6 @@ def handle_message(message):
         meses_pt = {1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril', 5: 'Maio', 6: 'Junho', 
                     7: 'Julho', 8: 'Agosto', 9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'}
 
-        # --- TRADUTOR AUTOMÁTICO DE MESES ---
         if data and data.get('month'):
             mes_original = str(data['month']).lower()
             traducao_meses = {
@@ -164,7 +171,6 @@ def handle_message(message):
         elif action == 'update_bank':
             old_bank = data.get('old_bank')
             new_bank = data.get('new_bank')
-            
             cur.execute("UPDATE accounts SET bank_name = %s WHERE user_id = %s AND bank_name ILIKE %s", (new_bank, user_id, f"%{old_bank}%"))
             if cur.rowcount > 0:
                 conn.commit()
@@ -194,14 +200,11 @@ def handle_message(message):
         elif action == 'update_category':
             old_cat = data.get('old_category')
             new_cat = data.get('new_category')
-            
             cur.execute("UPDATE transactions SET category = %s WHERE user_id = %s AND category ILIKE %s", (new_cat, user_id, f"%{old_cat}%"))
             trans_count = cur.rowcount
             cur.execute("UPDATE category_goals SET category = %s WHERE user_id = %s AND category ILIKE %s", (new_cat, user_id, f"%{old_cat}%"))
-            goal_count = cur.rowcount
-            
             conn.commit()
-            if trans_count > 0 or goal_count > 0:
+            if trans_count > 0 or cur.rowcount > 0:
                 bot.reply_to(message, f"✏️ Categoria **{old_cat}** alterada para **{new_cat}** com sucesso!", parse_mode="Markdown")
             else:
                 bot.reply_to(message, f"❌ Não encontrei a categoria **{old_cat}** para alterar.", parse_mode="Markdown")
@@ -211,10 +214,9 @@ def handle_message(message):
             cur.execute("UPDATE transactions SET category = 'GERAL' WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{cat}%"))
             trans_count = cur.rowcount
             cur.execute("DELETE FROM category_goals WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{cat}%"))
-            
             conn.commit()
             if trans_count > 0 or cur.rowcount > 0:
-                bot.reply_to(message, f"🗑️ Categoria **{cat}** deletada!\n⚠️ *Para não bagunçar seus relatórios, os gastos antigos foram movidos para a categoria 'GERAL'.*", parse_mode="Markdown")
+                bot.reply_to(message, f"🗑️ Categoria **{cat}** deletada!\n⚠️ *Os gastos antigos foram movidos para a categoria 'GERAL'.*", parse_mode="Markdown")
             else:
                 bot.reply_to(message, f"❌ Não encontrei a categoria **{cat}** para deletar.", parse_mode="Markdown")
 
@@ -222,7 +224,6 @@ def handle_message(message):
         elif action == 'delete_last':
             cur.execute("SELECT id, amount, description FROM transactions WHERE user_id = %s ORDER BY id DESC LIMIT 1", (user_id,))
             last_tx = cur.fetchone()
-            
             if last_tx:
                 tx_id, valor, desc = last_tx
                 cur.execute("DELETE FROM transactions WHERE id = %s", (tx_id,))
@@ -241,7 +242,6 @@ def handle_message(message):
             cur.execute("SELECT id, amount FROM scheduled_expenses WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s",
                         (user_id, f"%{desc}%", f"%{mes}%"))
             res = cur.fetchone()
-            
             if res:
                 cur.execute("DELETE FROM scheduled_expenses WHERE id = %s", (res[0],))
                 conn.commit()
@@ -263,10 +263,8 @@ def handle_message(message):
                 mes_num = (m - 1) % 12 + 1
                 nome_mes_ano = f"{meses_pt[mes_num]}/{ano}"
                 desc_completa = f"{desc} (Parcela {i+1}/{parcelas}) - Fatura {cartao} - {nome_mes_ano}"
-                
                 cur.execute("INSERT INTO scheduled_expenses (user_id, amount, description, is_active) VALUES (%s, %s, %s, true)",
                             (user_id, valor_parcela, desc_completa))
-            
             conn.commit()
             bot.reply_to(message, f"💳 Compra parcelada de R$ {total:.2f} anotada!\nDividida em {parcelas}x de R$ {valor_parcela:.2f} no cartão {cartao}, começando no próximo mês.")
 
@@ -296,7 +294,6 @@ def handle_message(message):
 
             cur.execute("INSERT INTO transactions (user_id, amount, category, description) VALUES (%s, %s, %s, %s)",
                         (user_id, data['amount'], data['category'], data['description']))
-            
             cur.execute("UPDATE accounts SET balance = balance - %s WHERE user_id = %s AND bank_name ILIKE %s",
                         (data['amount'], user_id, f"%{data['bank']}%"))
             conn.commit()
@@ -305,7 +302,6 @@ def handle_message(message):
 
             cur.execute("SELECT goal_amount FROM category_goals WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{data['category']}%"))
             goal_res = cur.fetchone()
-            
             if goal_res:
                 meta = goal_res[0]
                 cur.execute(f"SELECT SUM(amount) FROM transactions WHERE user_id = %s AND category ILIKE %s AND date >= date_trunc('month', {bahia_now})", 
@@ -328,7 +324,6 @@ def handle_message(message):
 
             cur.execute("SELECT goal_amount FROM category_goals WHERE user_id = %s AND category ILIKE %s", (user_id, f"%{cat}%"))
             goal_res = cur.fetchone()
-            
             if goal_res:
                 meta = float(goal_res[0])
                 cur.execute(f"SELECT SUM(amount) FROM transactions WHERE user_id = %s AND category ILIKE %s AND date >= date_trunc('month', {bahia_now})", 
@@ -352,11 +347,9 @@ def handle_message(message):
         elif action == 'list_goals':
             cur.execute("SELECT category, goal_amount FROM category_goals WHERE user_id = %s AND goal_amount > 0 ORDER BY category", (user_id,))
             metas = cur.fetchall()
-            
             if metas:
                 mensagem = "🎯 **Resumo de Todas as Metas:**\n\n"
                 total_livre = 0.0
-                
                 for cat, meta in metas:
                     meta = float(meta)
                     cur.execute(f"SELECT SUM(amount) FROM transactions WHERE user_id = %s AND category ILIKE %s AND date >= date_trunc('month', {bahia_now})", 
@@ -405,7 +398,6 @@ def handle_message(message):
                 ) AS cats ORDER BY category
             """, (user_id, user_id))
             cats = cur.fetchall()
-            
             if cats:
                 msg = "📂 **Suas categorias cadastradas:**\n" + "\n".join([f"• {c[0]}" for c in cats])
                 bot.reply_to(message, msg, parse_mode="Markdown")
@@ -459,7 +451,6 @@ def handle_message(message):
             desc = data.get('description', '')
             mes = data.get('month', '')
             bank = data.get('bank', '')
-            
             if not mes:
                 mes = meses_pt[hoje.month]
 
@@ -470,7 +461,6 @@ def handle_message(message):
                 total_pago = res[0]
                 cur.execute("UPDATE scheduled_expenses SET is_active = false WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s AND is_active = true",
                             (user_id, f"%{desc}%", f"%{mes}%"))
-                
                 cur.execute("UPDATE accounts SET balance = balance - %s WHERE user_id = %s AND bank_name ILIKE %s",
                             (total_pago, user_id, f"%{bank}%"))
                 conn.commit()
@@ -482,14 +472,12 @@ def handle_message(message):
             desc = data.get('description', '')
             mes = data.get('month', '')
             novo_valor = data.get('new_amount', 0.0)
-            
             if not mes:
                 mes = meses_pt[hoje.month]
 
             cur.execute("SELECT id FROM scheduled_expenses WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s AND is_active = true",
                         (user_id, f"%{desc}%", f"%{mes}%"))
             res = cur.fetchone()
-            
             if res:
                 cur.execute("UPDATE scheduled_expenses SET amount = %s WHERE id = %s", (novo_valor, res[0]))
                 conn.commit()
@@ -532,11 +520,11 @@ def handle_message(message):
             bot.reply_to(message, f"📊 Total de {label}: R$ {total:.2f}")
 
         else:
-            bot.reply_to(message, f"Oi Maique! Como posso ajudar?")
+            bot.reply_to(message, f"Oi! Como posso ajudar?")
 
     except Exception as e:
         erro_msg = traceback.format_exc()
-        print(f"Erro Crítico: {erro_msg}")
+        print(f"Erro Crítico: {erro_msg}", flush=True)
         bot.reply_to(message, "Oops! Houve um erro interno ao tentar processar o seu comando. Tente novamente!")
     finally:
         if conn:
