@@ -21,7 +21,6 @@ app = Flask(__name__)
 pending_user_actions = {}
 
 def get_db():
-    # Adicionado timeout de 10s para não travar o banco
     return psycopg2.connect(DB_URI, connect_timeout=10)
 
 def process_with_ai(text):
@@ -33,11 +32,11 @@ def process_with_ai(text):
                     "role": "system", 
                     "content": (
                         "Você é um assistente financeiro. Retorne APENAS JSON.\n"
-                        "1. Gasto: {'action': 'add_expense', 'amount': float, 'category': str, 'description': str, 'bank': str}\n"
+                        "1. Gasto (Dinheiro/Débito/Pix): {'action': 'add_expense', 'amount': float, 'category': str, 'description': str, 'bank': str}\n"
                         "2. Receita: {'action': 'add_income', 'amount': float, 'bank': str, 'description': str}\n"
                         "3. Saldo: {'action': 'get_balance', 'bank': str}\n"
                         "4. Fatura Simples ou Conta: {'action': 'add_bill', 'amount': float, 'description': str, 'month': 'MÊS EM PORTUGUÊS'}\n"
-                        "5. Compra Parcelada: {'action': 'add_installment', 'total_amount': float, 'installments': int, 'description': str, 'card': str}\n"
+                        "5. Compra Cartão de Crédito (1x ou Parcelado): {'action': 'add_credit_card_purchase', 'amount': float, 'installments': int, 'description': str, 'card': str}\n"
                         "6. Listar Contas/Faturas: {'action': 'list_bills', 'month': 'MÊS EM PORTUGUÊS'}\n"
                         "7. Total Contas/Faturas: {'action': 'total_bills', 'month': 'MÊS EM PORTUGUÊS'}\n"
                         "8. Pagar Conta/Fatura: {'action': 'pay_bill', 'description': str, 'month': 'MÊS EM PORTUGUÊS', 'bank': str}\n"
@@ -63,7 +62,7 @@ def process_with_ai(text):
                 {"role": "user", "content": text}
             ],
             response_format={"type": "json_object"},
-            timeout=15 # Impede que a IA trave o servidor
+            timeout=15
         )
         return json.loads(completion.choices[0].message.content)
     except Exception as e:
@@ -74,7 +73,6 @@ def process_with_ai(text):
 def index():
     return "ZapFinanceiro Online!", 200
 
-# --- NOVA ROTA PARA RECONECTAR O BOT ---
 @app.route('/set_webhook')
 def set_webhook_route():
     base_url = request.url_root.replace("http://", "https://")
@@ -85,7 +83,6 @@ def set_webhook_route():
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
-    # Removi a checagem rígida de content-type que pode barrar mensagens
     json_string = request.get_data().decode('utf-8')
     update = telebot.types.Update.de_json(json_string)
     bot.process_new_updates([update])
@@ -97,8 +94,6 @@ def handle_message(message):
     chat_id = message.chat.id
     text = message.text or ""
     conn = None
-
-    print(f"Nova mensagem recebida: {text}", flush=True)
 
     try:
         conn = get_db()
@@ -123,7 +118,7 @@ def handle_message(message):
                 elif isinstance(value, str):
                     data[key] = value.strip()
             
-            for key in ['category', 'old_category', 'new_category', 'bank', 'old_bank', 'new_bank']:
+            for key in ['category', 'old_category', 'new_category', 'bank', 'old_bank', 'new_bank', 'card']:
                 if data.get(key):
                     data[key] = data[key].upper()
 
@@ -249,24 +244,40 @@ def handle_message(message):
             else:
                 bot.reply_to(message, f"❌ Não encontrei nenhuma conta/fatura '{desc}' no mês de {mes} para apagar.")
 
-        # --- FUNÇÃO: COMPRA PARCELADA ---
-        elif action == 'add_installment':
-            total = data.get('total_amount', 0.0)
-            parcelas = data.get('installments', 1)
-            desc = data.get('description', 'Compra')
-            cartao = data.get('card', 'CARTÃO')
+        # --- NOVA FUNÇÃO: COMPRA CARTÃO DE CRÉDITO (SOMA DIRETAMENTE NA FATURA) ---
+        elif action == 'add_credit_card_purchase':
+            total = float(data.get('amount', 0.0))
+            parcelas = int(data.get('installments') or 1) # Se for à vista, é 1
+            if parcelas < 1: parcelas = 1
+            cartao = data.get('card', 'CARTÃO DE CRÉDITO')
             
             valor_parcela = total / parcelas
+            
             for i in range(parcelas):
-                m = hoje.month + i + 1
+                m = hoje.month + i + 1 # Começa a lançar no mês seguinte
                 ano = hoje.year + (m - 1) // 12
                 mes_num = (m - 1) % 12 + 1
-                nome_mes_ano = f"{meses_pt[mes_num]}/{ano}"
-                desc_completa = f"{desc} (Parcela {i+1}/{parcelas}) - Fatura {cartao} - {nome_mes_ano}"
-                cur.execute("INSERT INTO scheduled_expenses (user_id, amount, description, is_active) VALUES (%s, %s, %s, true)",
-                            (user_id, valor_parcela, desc_completa))
+                nome_mes = meses_pt[mes_num]
+                
+                # Busca se JÁ EXISTE uma fatura para este cartão neste mês
+                cur.execute("SELECT id FROM scheduled_expenses WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s AND is_active = true",
+                            (user_id, f"%{cartao}%", f"%{nome_mes}%"))
+                res = cur.fetchone()
+                
+                if res:
+                    # Soma o valor da parcela na fatura já existente
+                    cur.execute("UPDATE scheduled_expenses SET amount = amount + %s WHERE id = %s", (valor_parcela, res[0]))
+                else:
+                    # Cria a fatura do mês, caso ainda não exista
+                    nova_desc = f"Fatura {cartao} - {nome_mes}"
+                    cur.execute("INSERT INTO scheduled_expenses (user_id, amount, description, is_active) VALUES (%s, %s, %s, true)",
+                                (user_id, valor_parcela, nova_desc))
+            
             conn.commit()
-            bot.reply_to(message, f"💳 Compra parcelada de R$ {total:.2f} anotada!\nDividida em {parcelas}x de R$ {valor_parcela:.2f} no cartão {cartao}, começando no próximo mês.")
+            if parcelas == 1:
+                bot.reply_to(message, f"💳 Compra à vista de R$ {total:.2f} no cartão {cartao} processada!\nO valor foi somado à sua fatura de {meses_pt[(hoje.month % 12) + 1]}.", parse_mode="Markdown")
+            else:
+                bot.reply_to(message, f"💳 Compra parcelada de R$ {total:.2f} anotada!\nO valor de R$ {valor_parcela:.2f} foi somado à fatura do cartão {cartao} nos próximos {parcelas} meses.", parse_mode="Markdown")
 
         # --- AÇÕES DE GASTOS, RECEITAS E METAS ---
         elif action == 'add_income':
@@ -420,11 +431,7 @@ def handle_message(message):
                 agrupado = {}
                 total_mes = 0.0
                 for desc, amount in faturas:
-                    if " - FATURA " in desc.upper():
-                        chave = "Fatura " + desc.upper().split(" - FATURA ")[1]
-                    else:
-                        chave = desc
-                    
+                    chave = desc
                     valor = float(amount)
                     agrupado[chave] = agrupado.get(chave, 0) + valor
                     total_mes += valor
@@ -487,7 +494,7 @@ def handle_message(message):
 
         # --- OUTROS RELATÓRIOS E SALDOS ---
         elif action == 'get_balance':
-            cur.execute("SELECT bank_name, balance FROM accounts WHERE user_id = %s", (user_id,))
+            cur.execute("SELECT bank_name, balance FROM accounts WHERE user_id = %s ORDER BY bank_name", (user_id,))
             rows = cur.fetchall()
             
             if rows:
@@ -520,7 +527,7 @@ def handle_message(message):
             bot.reply_to(message, f"📊 Total de {label}: R$ {total:.2f}")
 
         else:
-            bot.reply_to(message, f"Oi! Como posso ajudar?")
+            bot.reply_to(message, f"Oi Maique! Como posso ajudar?")
 
     except Exception as e:
         erro_msg = traceback.format_exc()
