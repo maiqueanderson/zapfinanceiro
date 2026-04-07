@@ -21,7 +21,8 @@ app = Flask(__name__)
 pending_user_actions = {}
 
 def get_db():
-    return psycopg2.connect(DB_URI, connect_timeout=10)
+    # Aumentado o timeout para 60s para evitar falhas de "timeout expired" no Supabase
+    return psycopg2.connect(DB_URI, connect_timeout=60)
 
 def process_with_ai(text):
     try:
@@ -247,28 +248,25 @@ def handle_message(message):
         # --- NOVA FUNÇÃO: COMPRA CARTÃO DE CRÉDITO (SOMA DIRETAMENTE NA FATURA) ---
         elif action == 'add_credit_card_purchase':
             total = float(data.get('amount', 0.0))
-            parcelas = int(data.get('installments') or 1) # Se for à vista, é 1
+            parcelas = int(data.get('installments') or 1)
             if parcelas < 1: parcelas = 1
             cartao = data.get('card', 'CARTÃO DE CRÉDITO')
             
             valor_parcela = total / parcelas
             
             for i in range(parcelas):
-                m = hoje.month + i + 1 # Começa a lançar no mês seguinte
+                m = hoje.month + i + 1
                 ano = hoje.year + (m - 1) // 12
                 mes_num = (m - 1) % 12 + 1
                 nome_mes = meses_pt[mes_num]
                 
-                # Busca se JÁ EXISTE uma fatura para este cartão neste mês
                 cur.execute("SELECT id FROM scheduled_expenses WHERE user_id = %s AND description ILIKE %s AND description ILIKE %s AND is_active = true",
                             (user_id, f"%{cartao}%", f"%{nome_mes}%"))
                 res = cur.fetchone()
                 
                 if res:
-                    # Soma o valor da parcela na fatura já existente
                     cur.execute("UPDATE scheduled_expenses SET amount = amount + %s WHERE id = %s", (valor_parcela, res[0]))
                 else:
-                    # Cria a fatura do mês, caso ainda não exista
                     nova_desc = f"Fatura {cartao} - {nome_mes}"
                     cur.execute("INSERT INTO scheduled_expenses (user_id, amount, description, is_active) VALUES (%s, %s, %s, true)",
                                 (user_id, valor_parcela, nova_desc))
